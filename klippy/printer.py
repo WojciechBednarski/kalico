@@ -139,55 +139,24 @@ class Printer:
             return self.objects[section]
         module_parts = section.split()
         module_name = module_parts[0]
-        extras_py_name = os.path.join(
-            os.path.dirname(__file__), "extras", module_name + ".py"
+        extras_spec = importlib.util.find_spec(
+            f".{module_name}", "klippy.extras"
         )
-        extras_py_dirname = os.path.join(
-            os.path.dirname(__file__), "extras", module_name, "__init__.py"
+        plugins_spec = importlib.util.find_spec(
+            f".{module_name}", "klippy.plugins"
         )
-
-        plugins_py_dirname = os.path.join(
-            os.path.dirname(__file__), "plugins", module_name, "__init__.py"
-        )
-        plugins_py_name = os.path.join(
-            os.path.dirname(__file__), "plugins", module_name + ".py"
-        )
-
-        found_in_extras = os.path.exists(extras_py_name) or os.path.exists(
-            extras_py_dirname
-        )
-        found_in_plugins = os.path.exists(plugins_py_name)
-        found_in_plugins_dir = os.path.exists(plugins_py_dirname)
-
-        if not any([found_in_extras, found_in_plugins, found_in_plugins_dir]):
-            if default is not configfile.sentinel:
-                return default
-            raise self.config_error("Unable to load module '%s'" % (section,))
-
-        if (
-            found_in_extras
-            and (found_in_plugins or found_in_plugins_dir)
-            and not get_danger_options().allow_plugin_override
-        ):
-            raise self.config_error(
-                "Module '%s' found in both extras and plugins!" % (section,)
-            )
-
-        if found_in_plugins:
-            mod_spec = importlib.util.spec_from_file_location(
-                "klippy.extras." + module_name, plugins_py_name
-            )
-            mod = importlib.util.module_from_spec(mod_spec)
-            mod_spec.loader.exec_module(mod)
-        elif found_in_plugins_dir:
-            mod_spec = importlib.util.spec_from_file_location(
-                "klippy.plugins." + module_name, plugins_py_dirname
-            )
-            mod = importlib.util.module_from_spec(mod_spec)
-            mod_spec.loader.exec_module(mod)
+        if plugins_spec:
+            if extras_spec and not get_danger_options().allow_plugin_override:
+                raise self.config_error(
+                    f"Module '{section}' found in both extras and plugins!"
+                )
+            mod = importlib.import_module(plugins_spec.name)
+        elif extras_spec:
+            mod = importlib.import_module(extras_spec.name)
+        elif default is not configfile.sentinel:
+            return default
         else:
-            mod = importlib.import_module("klippy.extras." + module_name)
-
+            raise self.config_error(f"Unable to load module '{section}'")
         init_func = "load_config"
         if len(module_parts) > 1:
             init_func = "load_config_prefix"
@@ -195,7 +164,7 @@ class Printer:
         if init_func is None:
             if default is not configfile.sentinel:
                 return default
-            raise self.config_error("Unable to load module '%s'" % (section,))
+            raise self.config_error(f"Unable to load module '{section}'")
         self.objects[section] = init_func(config.getsection(section))
         return self.objects[section]
 
