@@ -4,7 +4,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-import sys, os, gc, optparse, logging, time, collections, importlib, importlib.util
+import sys, os, gc, optparse, logging, time, collections
+import importlib, importlib.metadata, importlib.util
 
 from . import compat
 from . import util, reactor, queuelogger, msgproto
@@ -145,7 +146,18 @@ class Printer:
         plugins_spec = importlib.util.find_spec(
             f".{module_name}", "klippy.plugins"
         )
-        if plugins_spec:
+        entrypoints = importlib.metadata.entry_points(
+            group="klippy.plugins", name=module_name
+        )
+        if entrypoints:
+            entrypoint = entrypoints[module_name]
+            if extras_spec and not get_danger_options().allow_plugin_override:
+                raise self.config_error(
+                    f"Module '{section}' found in both extras and "
+                    f"installed plugin {entrypoint.dist.name} (v{entrypoint.dist.version})"
+                )
+            mod = entrypoint.load()
+        elif plugins_spec:
             if extras_spec and not get_danger_options().allow_plugin_override:
                 raise self.config_error(
                     f"Module '{section}' found in both extras and plugins!"
@@ -505,6 +517,7 @@ def main():
         "apiserver_group": options.apiserver_group,
         "apiserver_file_mode": options.apiserver_file_mode,
         "start_reason": "startup",
+        "plugins": {},
     }
 
     debuglevel = logging.INFO
@@ -540,6 +553,12 @@ def main():
     extra_git_desc += "\nBranch: %s" % (git_info["branch"])
     extra_git_desc += "\nRemote: %s" % (git_info["remote"])
     extra_git_desc += "\nTracked URL: %s" % (git_info["url"])
+
+    plugins = importlib.metadata.entry_points(group="klippy.plugins")
+    for plugin in plugins:
+        extra_git_desc += f"\nPlugin {plugin.dist.name}=={plugin.dist.version}"
+        start_args["plugins"][plugin.dist.name] = plugin.dist.metadata.json
+
     start_args["software_version"] = git_vers
     start_args["git_branch"] = git_info["branch"]
     start_args["git_remote"] = git_info["remote"]
