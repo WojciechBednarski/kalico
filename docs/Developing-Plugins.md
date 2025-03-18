@@ -18,7 +18,7 @@ Within these files you can define metadata that allows other packages to interac
 
 Kalico's official plugin support takes advantage of the Python [Entry Points for Plugins](https://setuptools.pypa.io/en/latest/userguide/entry_point.html#entry-points-for-plugins) system, allowing for easy installation and discovery.
 
-Once installed, a package with an entry-point under `klippy.plugins` can be discovered by Kalico and loaded at runtime (See `Printer.load_object()` in [`klippy/printer.py`](../klippy/printer.py)).
+Once installed, a package with an entry-point under `kalico.plugins` can be discovered by Kalico and loaded at runtime (See `Printer.load_object()` in [`klippy/printer.py`](../klippy/printer.py)).
 
 A full example plugin can be found at [github.com/KalicoCrew/plugin-example](https://github.com/KalicoCrew/plugin-example)
 
@@ -81,7 +81,7 @@ classifiers = [
     "Framework :: Klippy",
 ]
 
-[project.entry-points."klippy.plugins"]
+[project.entry-points."kalico.plugins"]
 my_plugin = "my_plugin"
 ```
 
