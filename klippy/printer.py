@@ -147,7 +147,7 @@ class Printer:
             f".{module_name}", "klippy.plugins"
         )
         entrypoints = importlib.metadata.entry_points(
-            group="klippy.plugins", name=module_name
+            group="kalico.plugins", name=module_name
         )
         if entrypoints:
             entrypoint = entrypoints[module_name]
@@ -156,6 +156,9 @@ class Printer:
                     f"Module '{section}' found in both extras and "
                     f"installed plugin {entrypoint.dist.name} (v{entrypoint.dist.version})"
                 )
+            logging.info(
+                f"Loading '{module_name}' from plugin {entrypoint.dist.name} ({entrypoint.dist.version})"
+            )
             mod = entrypoint.load()
         elif plugins_spec:
             if extras_spec and not get_danger_options().allow_plugin_override:
@@ -203,7 +206,7 @@ class Printer:
         ]:
             self.load_object(config, section_config, None)
         if self.get_start_args().get("debuginput") is not None:
-            self.load_object(config, "testing", None)
+            self.load_object(config, "testing")
         for m in [toolhead]:
             m.add_printer_objects(config)
         # Validate that there are no undefined parameters in the config file
@@ -554,7 +557,7 @@ def main():
     extra_git_desc += "\nRemote: %s" % (git_info["remote"])
     extra_git_desc += "\nTracked URL: %s" % (git_info["url"])
 
-    plugins = importlib.metadata.entry_points(group="klippy.plugins")
+    plugins = importlib.metadata.entry_points(group="kalico.plugins")
     for plugin in plugins:
         extra_git_desc += f"\nPlugin {plugin.dist.name}=={plugin.dist.version}"
         start_args["plugins"][plugin.dist.name] = plugin.dist.metadata.json
@@ -571,6 +574,7 @@ def main():
                 f"Git version: {repr(start_args['software_version'])}{extra_git_desc}",
                 f"CPU: {start_args['cpu_info']}",
                 f"Python: {repr(sys.version)}",
+                f"Plugins: {start_args['plugins']}",
             ]
         )
         logging.info(versions)
