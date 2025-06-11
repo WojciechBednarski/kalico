@@ -5,7 +5,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import sys, os, gc, optparse, logging, time, collections
-import importlib, importlib.metadata, importlib.util
+import importlib, importlib.util
+import importlib_metadata
 
 from . import compat
 from . import util, reactor, queuelogger, msgproto
@@ -146,7 +147,7 @@ class Printer:
         plugins_spec = importlib.util.find_spec(
             f".{module_name}", "klippy.plugins"
         )
-        entrypoints = importlib.metadata.entry_points(
+        entrypoints = importlib_metadata.entry_points(
             group="kalico.plugins", name=module_name
         )
         if entrypoints:
@@ -557,7 +558,7 @@ def main():
     extra_git_desc += "\nRemote: %s" % (git_info["remote"])
     extra_git_desc += "\nTracked URL: %s" % (git_info["url"])
 
-    plugins = importlib.metadata.entry_points(group="kalico.plugins")
+    plugins = importlib_metadata.entry_points(group="kalico.plugins")
     for plugin in plugins:
         extra_git_desc += f"\nPlugin {plugin.dist.name}=={plugin.dist.version}"
         start_args["plugins"][plugin.dist.name] = plugin.dist.metadata.json
