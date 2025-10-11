@@ -553,8 +553,8 @@ class Homing:
         gcode.run_script_from_command("M400")
 
         if retries and hi.retry_gcode is not None:
-            self.gcode.respond_info("Executing retry_gcode")
-            self.gcode.run_script_from_command(hi.retry_gcode)
+            gcode.respond_info("Executing retry_gcode")
+            hi.retry_gcode.run_gcode_from_command()
 
     def process_homing(self, distances, homing_axes):
         pass
