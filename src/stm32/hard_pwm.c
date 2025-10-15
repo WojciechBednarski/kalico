@@ -21,18 +21,11 @@ struct gpio_pwm_info {
 
 static const struct gpio_pwm_info pwm_regs[] = {
 #if CONFIG_MACH_STM32F0
-<<<<<<< HEAD
-<<<<<<< HEAD
   #if CONFIG_MACH_STM32F0x2
     {TIM3, GPIO('B', 4), 1, GPIO_FUNCTION(1)},
-=======
+  #endif
   #if CONFIG_MACH_STM32F042
-  {TIM3, GPIO('B', 4), 1, GPIO_FUNCTION(1)},
->>>>>>> 12cc944fa (stm32: F042 define PB4 HW PWM)
-=======
-  #if CONFIG_MACH_STM32F042
-  {TIM3, GPIO('B', 4), 1, GPIO_FUNCTION(1)},
->>>>>>> 12cc944fa (stm32: F042 define PB4 HW PWM)
+    {TIM3, GPIO('B', 4), 1, GPIO_FUNCTION(1)},
   #endif
   #if CONFIG_MACH_STM32F070
     {TIM15, GPIO('A', 2), 1, GPIO_FUNCTION(0)},
