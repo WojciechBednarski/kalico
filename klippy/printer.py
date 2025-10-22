@@ -6,7 +6,6 @@
 
 import sys, os, gc, optparse, logging, time, collections
 import importlib, importlib.util
-import importlib_metadata
 
 from . import compat
 from . import util, reactor, queuelogger, msgproto
@@ -147,18 +146,17 @@ class Printer:
         plugins_spec = importlib.util.find_spec(
             f".{module_name}", "klippy.plugins"
         )
-        entrypoints = importlib_metadata.entry_points(
-            group="kalico.plugins", name=module_name
-        )
-        if entrypoints:
+        entrypoints = util.find_entrypoints()
+        if module_name in entrypoints:
             entrypoint = entrypoints[module_name]
+            metadata = util.entrypoint_metadata(entrypoint)
             if extras_spec and not get_danger_options().allow_plugin_override:
                 raise self.config_error(
                     f"Module '{section}' found in both extras and "
-                    f"installed plugin {entrypoint.dist.name} (v{entrypoint.dist.version})"
+                    f"installed plugin {metadata['name']} (v{metadata['version']})"
                 )
             logging.info(
-                f"Loading '{module_name}' from plugin {entrypoint.dist.name} ({entrypoint.dist.version})"
+                f"Loading '{module_name}' from plugin {metadata['name']} (v{metadata['version']})"
             )
             mod = entrypoint.load()
         elif plugins_spec:
@@ -558,10 +556,10 @@ def main():
     extra_git_desc += "\nRemote: %s" % (git_info["remote"])
     extra_git_desc += "\nTracked URL: %s" % (git_info["url"])
 
-    plugins = importlib_metadata.entry_points(group="kalico.plugins")
-    for plugin in plugins:
-        extra_git_desc += f"\nPlugin {plugin.dist.name}=={plugin.dist.version}"
-        start_args["plugins"][plugin.dist.name] = plugin.dist.metadata.json
+    for entrypoint in util.find_entrypoints().values():
+        metadata = util.entrypoint_metadata(entrypoint)
+        extra_git_desc += f"\nPlugin {metadata['name']}=={metadata['version']}"
+        start_args["plugins"][metadata["name"]] = metadata
 
     start_args["software_version"] = git_vers
     start_args["git_branch"] = git_info["branch"]
