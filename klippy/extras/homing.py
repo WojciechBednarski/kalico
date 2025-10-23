@@ -307,13 +307,13 @@ class Homing:
         for endstop in endstops:
             endstop[0].query_endstop(print_time)
 
-    def _calc_mean(self, positions):
-        return sum(positions) / float(len(positions))
+    def _calc_mean(self, distances):
+        return sum(distances) / float(len(distances))
 
-    def _calc_median(self, positions):
-        z_sorted = sorted(positions)
-        middle = len(positions) // 2
-        if (len(positions) & 1) == 1:
+    def _calc_median(self, distances):
+        z_sorted = sorted(distances)
+        middle = len(distances) // 2
+        if (len(distances) & 1) == 1:
             # odd number of samples
             return z_sorted[middle]
         # even number of samples
@@ -337,11 +337,7 @@ class Homing:
         self.init_homing(hi, homing_axes)
         needs_rehome = False
         retract_dist = hi.retract_dist
-        sample_retract_dist = (
-            hi.sample_retract_dist
-            if hi.positive_dir
-            else -1 * hi.sample_retract_dist
-        )
+        sample_retract_dist = hi.sample_retract_dist
         hmove = HomingMove(self.printer, endstops)
 
         retries = 0
@@ -367,7 +363,7 @@ class Homing:
             ]
             self.toolhead.move(retractpos, retract_speed)
 
-        def _process_samples():
+        def _process_samples(trigpos):
             nonlocal drop_result, distances, retries
             # early return if we don't use samples for homing
             if hi.sample_count == 1:
@@ -380,17 +376,29 @@ class Homing:
                 drop_result = False
             else:
                 if not distances:
-                    result = [0.0] * len(hmove.distance_elapsed)
+                    result = [0] * len(hmove.distance_elapsed)
                 else:
+                    haltpos = self.toolhead.get_position()
                     result = [
-                        distances[-1][i] + dist - sample_retract_dist
+                        distances[-1][i]
+                        # Last deviation from the first home which is defined as 0.0
+                        + (
+                            (dist - sample_retract_dist)
+                            if hi.positive_dir
+                            else (dist + sample_retract_dist)
+                        )
+                        # deviation between retract and actual distance traveled till endstop triggered
+                        - (haltpos[i] - trigpos[i])
+                        # compensate for the deviation between haltpos and trigpos
                         if i in homing_axes
-                        else 0.0
+                        else 0
                         for i, dist in enumerate(hmove.distance_elapsed)
                     ]
                 for i in homing_axes:
                     gcode.respond_info(
-                        f"Homing sample for {'XYZ'[i]}: {result[i]}"
+                        f"Homing sample for {'XYZ'[i]}: {result[i]:.9f}".rstrip(
+                            "0"
+                        ).rstrip(".")
                     )
                 distances.append(result)
 
@@ -427,7 +435,7 @@ class Homing:
                     self._set_homing_accel(hi.accel, pre_homing=True)
                     self._set_homing_current(homing_axes, pre_homing=True)
                     self._reset_endstop_states(endstops)
-                    hmove.homing_move(homepos, hi.speed)
+                    trigpos = hmove.homing_move(homepos, hi.speed)
                 finally:
                     self._set_homing_accel(hi.accel, pre_homing=False)
 
@@ -436,6 +444,7 @@ class Homing:
                 ):
                     needs_rehome = True
                     retract_dist = hi.min_home_dist
+                    sample_retract_dist = hi.min_home_dist
                     gcode.respond_info(
                         "Moved less than min_home_dist. Retrying..."
                     )
@@ -443,7 +452,7 @@ class Homing:
                 if not hi.use_sensorless_homing and retract_dist:
                     break
 
-                _process_samples()
+                _process_samples(trigpos)
 
             # Perform second home
             if (not hi.use_sensorless_homing or needs_rehome) and retract_dist:
@@ -469,7 +478,9 @@ class Homing:
                         self._reset_endstop_states(endstops)
 
                         hmove = HomingMove(self.printer, endstops)
-                        hmove.homing_move(homepos, hi.second_homing_speed)
+                        trigpos = hmove.homing_move(
+                            homepos, hi.second_homing_speed
+                        )
 
                         if hmove.check_no_movement() is not None:
                             raise self.printer.command_error(
@@ -489,7 +500,7 @@ class Homing:
                     finally:
                         self._set_homing_accel(hi.accel, pre_homing=False)
 
-                    _process_samples()
+                    _process_samples(trigpos)
 
         finally:
             self._set_homing_accel(hi.accel, pre_homing=False)
@@ -517,10 +528,13 @@ class Homing:
                     calc_adjustment([dist[i] for dist in distances])
                     - distances[-1][i]
                 )
+                pos[i] = round(pos[i], 9)
 
             for i in homing_axes:
                 gcode.respond_info(
-                    f"Final homing position for {'XYZ'[i]}: {pos[i] + distances[-1][i]}"
+                    f"Final homing position for {'XYZ'[i]}: {round(pos[i] + distances[-1][i], 9):.9f}".rstrip(
+                        "0"
+                    ).rstrip(".")
                 )
             self.toolhead.set_position(pos)
             if hi.move_toolhead_after_adjusting:
@@ -620,7 +634,7 @@ class HomingAccuracy(Homing):
             sigma = (deviation_sum / len(dists)) ** 0.5
 
             self.gcmd.respond_info(
-                "probe accuracy results: maximum %.6f, minimum %.6f, range %.6f, "
+                "homing accuracy results: maximum %.6f, minimum %.6f, range %.6f, "
                 "average %.6f, median %.6f, standard deviation %.6f"
                 % (max_value, min_value, range_value, avg_value, median, sigma)
             )
