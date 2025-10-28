@@ -4,13 +4,31 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-import sys, os, gc, optparse, logging, time, collections, importlib, importlib.util
+import collections
+import gc
+import importlib
+import importlib.util
+import logging
+import optparse
+import os
+import sys
+import time
 
-from . import compat
-from . import util, reactor, queuelogger, msgproto
-from . import gcode, configfile, pins, mcu, toolhead, webhooks
+from . import (
+    APP_NAME,
+    compat,
+    configfile,
+    gcode,
+    mcu,
+    msgproto,
+    pins,
+    queuelogger,
+    reactor,
+    toolhead,
+    util,
+    webhooks,
+)
 from .extras.danger_options import get_danger_options
-from . import APP_NAME
 
 message_ready = "Printer is ready"
 
@@ -425,8 +443,9 @@ class Printer:
 
 def import_test():
     # Import all optional modules (used as a build test)
-    from .extras import danger_options
     from unittest import mock
+
+    from .extras import danger_options
 
     danger_options.DANGER_OPTIONS = mock.Mock()
     dname = os.path.dirname(__file__)

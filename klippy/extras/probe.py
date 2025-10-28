@@ -5,7 +5,9 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 import math
+
 from klippy import pins
+
 from . import manual_probe
 
 HINT_TIMEOUT = """
