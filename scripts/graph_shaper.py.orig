@@ -5,6 +5,7 @@
 # Copyright (C) 2020-2023  Dmitry Butyugin <dmbutyugin@google.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+<<<<<<< HEAD
 import optparse, importlib, math, os, sys
 import numpy as np, matplotlib
 
@@ -13,6 +14,12 @@ sys.path.append(
 )
 shaper_defs = importlib.import_module(".shaper_defs", "extras")
 shaper_calibrate = importlib.import_module(".shaper_calibrate", "extras")
+=======
+import math
+import optparse
+
+import matplotlib
+>>>>>>> main
 
 # A set of damping ratios to calculate shaper response for
 DAMPING_RATIOS = [0.075, 0.1, 0.15]
