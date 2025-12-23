@@ -41,7 +41,7 @@ config MCU
 config CLOCK_FREQ
     int
     default 12000000 if MACH_RP2040
-    default 150000000 if MACH_RP2350
+    default 168000000 if MACH_RP2350
 
 config FLASH_SIZE
     hex
