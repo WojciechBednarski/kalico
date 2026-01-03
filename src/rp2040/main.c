@@ -14,6 +14,8 @@
 #include "hardware/structs/xosc.h" // xosc_hw
 #include "internal.h" // enable_pclock
 #include "sched.h" // sched_main
+#include "hardware/regs/powman.h"
+#include "hardware/structs/powman.h"
 
 #if CONFIG_MACH_RP2040
 #include "hardware/structs/vreg_and_chip_reset.h" // vreg_and_chip_reset_hw
@@ -60,8 +62,8 @@ bootloader_request(void)
  ****************************************************************/
 
 #define FREQ_XOSC 12000000
-#define FREQ_SYS (CONFIG_MACH_RP2040 ? 200000000 : CONFIG_CLOCK_FREQ)
-#define FBDIV (FREQ_SYS == 200000000 ? 100 : 125)
+#define FREQ_SYS (CONFIG_MACH_RP2040 ? 200000000 : 336000000) //CONFIG_CLOCK_FREQ)
+#define FBDIV (CONFIG_MACH_RP2040 ? 100 : 84)
 #define FREQ_USB 48000000
 
 void set_vsel(void)
@@ -73,6 +75,16 @@ void set_vsel(void)
     cval &= ~VREG_AND_CHIP_RESET_VREG_VSEL_BITS;
     cval |= vref << VREG_AND_CHIP_RESET_VREG_VSEL_LSB;
     vreg_and_chip_reset_hw->vreg = cval;
+    #else
+    // RP2350: Set voltage to 1.20V for stable 288MHz operation
+    // VSEL = 0x0d (13) = 1.20V from the voltage table
+    uint32_t vreg = powman_hw->vreg;
+    vreg &= ~POWMAN_VREG_VSEL_BITS;
+    vreg |= (0x0d << POWMAN_VREG_VSEL_LSB);  // 1.20V
+    powman_hw->vreg = vreg;
+    
+    // Wait for voltage to stabilize
+    for (volatile int i = 0; i < 10000; i++);
 #endif
 }
 
@@ -129,6 +141,27 @@ pll_setup(pll_hw_t *pll, uint32_t mul, uint32_t postdiv)
 }
 
 static void
+pll_setup_new(pll_hw_t *pll, uint32_t mul, uint32_t postdiv1, uint32_t postdiv2)
+{
+    // Setup pll
+    uint32_t refdiv = 1, fbdiv = mul;
+    if (postdiv1 > 0x07) {
+        postdiv1 >>= 1;
+        postdiv2 <<= 1;
+    }
+    pll->cs = refdiv;
+    pll->fbdiv_int = fbdiv;
+    pll->pwr = PLL_PWR_DSMPD_BITS | PLL_PWR_POSTDIVPD_BITS;
+    while (!(pll->cs & PLL_CS_LOCK_BITS))
+        ;
+
+    // Setup post divider
+    pll->prim = ((postdiv1 << PLL_PRIM_POSTDIV1_LSB)
+                 | (postdiv2 << PLL_PRIM_POSTDIV2_LSB));
+    pll->pwr = PLL_PWR_DSMPD_BITS;
+}
+
+static void
 clk_aux_setup(uint32_t clk_id, uint32_t aux_id)
 {
     clock_hw_t *clk = &clocks_hw->clk[clk_id];
@@ -157,7 +190,11 @@ clock_setup(void)
     xosc_setup();
     enable_pclock(RESETS_RESET_PLL_SYS_BITS);
     set_vsel();
+    #if CONFIG_MACH_RP2040
     pll_setup(pll_sys_hw, FBDIV, FBDIV * FREQ_XOSC / FREQ_SYS);
+    #else
+    pll_setup_new(pll_sys_hw, FBDIV, 1, 3);
+    #endif
     csys->ctrl = 0;
     csys->div = 1<<CLOCKS_CLK_SYS_DIV_INT_LSB;
     csys->ctrl = CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX;
@@ -166,7 +203,9 @@ clock_setup(void)
 
     // Setup pll_usb
     enable_pclock(RESETS_RESET_PLL_USB_BITS);
+
     pll_setup(pll_usb_hw, 80, 80*FREQ_XOSC/FREQ_USB);
+
 
     // Setup peripheral clocks
     clk_aux_setup(clk_peri, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS);
