@@ -1,6 +1,6 @@
 # Code for handling printer nozzle extruders
 #
-# Copyright (C) 2016-2022  Kevin O'Connor <kevin@koconnor.net>
+# Copyright (C) 2016-2025  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
@@ -215,7 +215,7 @@ class ExtruderStepper:
         self.stepper = stepper.PrinterStepper(config)
         ffi_main, ffi_lib = chelper.get_ffi()
         self.sk_extruder = ffi_main.gc(
-            ffi_lib.extruder_stepper_alloc(), ffi_lib.free
+            ffi_lib.extruder_stepper_alloc(), ffi_lib.extruder_stepper_free
         )
         self.stepper.set_stepper_kinematics(self.sk_extruder)
         ffi_lib.extruder_set_pressure_advance_model_func(
@@ -259,8 +259,6 @@ class ExtruderStepper:
         )
 
     def _handle_connect(self):
-        toolhead = self.printer.lookup_object("toolhead")
-        toolhead.register_step_generator(self.stepper.generate_steps)
         self._update_pressure_advance(
             self.pa_model, self.pressure_advance_time_offset
         )
@@ -309,7 +307,6 @@ class ExtruderStepper:
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.flush_step_generation()
         ffi_main, ffi_lib = chelper.get_ffi()
-        old_delay = ffi_lib.extruder_get_step_gen_window(self.sk_extruder)
         if self.pa_model.name != pa_model.name:
             pa_func = pa_model.get_func()
             ffi_lib.extruder_set_pressure_advance_model_func(
@@ -321,15 +318,13 @@ class ExtruderStepper:
         )
         self.smoother.update_pa_model(pa_model)
         self.smoother.update_extruder_kinematics(self.sk_extruder)
-        new_delay = ffi_lib.extruder_get_step_gen_window(self.sk_extruder)
-        if old_delay != new_delay:
-            toolhead.note_step_generation_scan_time(new_delay, old_delay)
+        motion_queuing = self.printer.lookup_object("motion_queuing")
+        motion_queuing.check_step_generation_scan_windows()
         self.pa_model = pa_model
         self.pressure_advance_time_offset = time_offset
 
     def update_input_shaping(self, shapers, exact_mode):
         ffi_main, ffi_lib = chelper.get_ffi()
-        old_delay = ffi_lib.extruder_get_step_gen_window(self.sk_extruder)
         failed_shapers = []
         for shaper in shapers:
             if not shaper.update_extruder_kinematics(
@@ -343,10 +338,8 @@ class ExtruderStepper:
             else:
                 self.smoother.enable_axis(shaper.get_axis())
         self.smoother.update_extruder_kinematics(self.sk_extruder)
-        new_delay = ffi_lib.extruder_get_step_gen_window(self.sk_extruder)
-        toolhead = self.printer.lookup_object("toolhead")
-        if old_delay != new_delay:
-            toolhead.note_step_generation_scan_time(new_delay, old_delay)
+        motion_queuing = self.printer.lookup_object("motion_queuing")
+        motion_queuing.check_step_generation_scan_windows()
         return failed_shapers
 
     cmd_SET_PRESSURE_ADVANCE_help = "Set pressure advance parameters"
@@ -468,10 +461,9 @@ class PrinterExtruder:
             "instantaneous_corner_velocity", 1.0, minval=0.0
         )
         # Setup extruder trapq (trapezoidal motion queue)
-        ffi_main, ffi_lib = chelper.get_ffi()
-        self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
-        self.trapq_append = ffi_lib.trapq_append
-        self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
+        self.motion_queuing = self.printer.load_object(config, "motion_queuing")
+        self.trapq = self.motion_queuing.allocate_trapq()
+        self.trapq_append = self.motion_queuing.lookup_trapq_append()
 
         # Setup extruder stepper
         self.extruder_steppers = []
@@ -510,9 +502,6 @@ class PrinterExtruder:
     def get_extruder_steppers(self):
         return self.extruder_steppers
 
-    def update_move_time(self, flush_time, clear_history_time):
-        self.trapq_finalize_moves(self.trapq, flush_time, clear_history_time)
-
     def get_status(self, eventtime):
         sts = self.heater.get_status(eventtime)
         sts["can_extrude"] = self.heater.can_extrude
@@ -529,23 +518,27 @@ class PrinterExtruder:
     def get_trapq(self):
         return self.trapq
 
+    def get_axis_gcode_id(self):
+        return "E"
+
     def stats(self, eventtime):
         return self.heater.stats(eventtime)
 
-    def check_move(self, move):
-        axis_r = move.axes_r[3]
+    def check_move(self, move, ea_index):
         if not self.heater.can_extrude:
             raise self.printer.command_error(
                 "Extrude below minimum temp\n"
                 "See the 'min_extrude_temp' config option for details"
             )
+        axis_r = move.axes_r[ea_index]
+        axis_d = move.axes_d[ea_index]
         if (not move.axes_d[0] and not move.axes_d[1]) or axis_r < 0.0:
             # Extrude only move (or retraction move) - limit accel and velocity
-            if abs(move.axes_d[3]) > self.max_e_dist:
+            if abs(axis_d) > self.max_e_dist:
                 raise self.printer.command_error(
                     "Extrude only move too long (%.3fmm vs %.3fmm)\n"
                     "See the 'max_extrude_only_distance' config"
-                    " option for details" % (move.axes_d[3], self.max_e_dist)
+                    " option for details" % (axis_d, self.max_e_dist)
                 )
             inv_extrude_r = 1.0 / abs(axis_r)
             move.limit_speed(
@@ -553,7 +546,7 @@ class PrinterExtruder:
                 self.max_e_accel * inv_extrude_r,
             )
         elif axis_r > self.max_extrude_ratio:
-            if move.axes_d[3] <= self.nozzle_diameter * self.max_extrude_ratio:
+            if axis_d <= self.nozzle_diameter * self.max_extrude_ratio:
                 # Permit extrusion if amount extruded is tiny
                 return
             area = axis_r * self.filament_area
@@ -570,14 +563,14 @@ class PrinterExtruder:
                 % (area, self.max_extrude_ratio * self.filament_area)
             )
 
-    def calc_junction(self, prev_move, move):
-        diff_r = move.axes_r[3] - prev_move.axes_r[3]
+    def calc_junction(self, prev_move, move, ea_index):
+        diff_r = move.axes_r[ea_index] - prev_move.axes_r[ea_index]
         if diff_r:
             return (self.instant_corner_v / abs(diff_r)) ** 2
         return move.max_cruise_v2
 
-    def move(self, print_time, move):
-        axis_r = move.axes_r[3]
+    def process_move(self, print_time, move, ea_index):
+        axis_r = move.axes_r[ea_index]
         abs_axis_r = abs(axis_r)
         accel = move.accel * abs_axis_r
         start_v = move.start_v * abs_axis_r
@@ -605,7 +598,7 @@ class PrinterExtruder:
             cruise_v,
             accel,
         )
-        extr_d = abs(move.axes_d[3])
+        extr_d = abs(move.axes_d[ea_index])
         for i in range(3):
             self.last_position[i] += extr_d * extr_r[i]
 
@@ -672,16 +665,13 @@ class DummyExtruder:
     def __init__(self, printer):
         self.printer = printer
 
-    def update_move_time(self, flush_time, clear_history_time):
-        pass
-
-    def check_move(self, move):
+    def check_move(self, move, ea_index):
         raise move.move_error("Extrude when no extruder present")
 
     def find_past_position(self, print_time):
         return 0.0
 
-    def calc_junction(self, prev_move, move):
+    def calc_junction(self, prev_move, move, ea_index):
         return move.max_cruise_v2
 
     def get_name(self):
@@ -694,7 +684,10 @@ class DummyExtruder:
         raise self.printer.command_error("Extruder not configured")
 
     def get_trapq(self):
-        raise self.printer.command_error("Extruder not configured")
+        return None
+
+    def get_axis_gcode_id(self):
+        return "E"
 
 
 def add_printer_objects(config):
