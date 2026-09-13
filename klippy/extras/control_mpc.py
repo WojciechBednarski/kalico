@@ -744,9 +744,7 @@ class MpcCalibrate:
                 )
             block_heat_capacity = heater_power / fastest_rate[2]
             sensor_lag_delta = (
-                fastest_rate[2] * fastest_rate[0]
-                + start_temp
-                - fastest_rate[1]
+                fastest_rate[2] * fastest_rate[0] + start_temp - fastest_rate[1]
             )
             if sensor_lag_delta <= 0.0:
                 raise self.printer.command_error(
