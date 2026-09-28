@@ -14,12 +14,12 @@
 #include "hardware/structs/xosc.h" // xosc_hw
 #include "internal.h" // enable_pclock
 #include "sched.h" // sched_main
-#include "hardware/regs/powman.h"
-#include "hardware/structs/powman.h"
 
 #if CONFIG_MACH_RP2040
 #include "hardware/structs/vreg_and_chip_reset.h" // vreg_and_chip_reset_hw
 #else
+#include "hardware/regs/powman.h" // POWMAN_VREG_VSEL_BITS
+#include "hardware/structs/powman.h" // powman_hw
 #include "hardware/structs/ticks.h" // ticks_hw
 #endif
 
@@ -142,6 +142,7 @@ pll_setup(pll_hw_t *pll, uint32_t mul, uint32_t postdiv)
     pll->pwr = PLL_PWR_DSMPD_BITS;
 }
 
+#if !CONFIG_MACH_RP2040
 static void
 pll_setup_new(pll_hw_t *pll, uint32_t mul, uint32_t postdiv1, uint32_t postdiv2)
 {
@@ -162,6 +163,7 @@ pll_setup_new(pll_hw_t *pll, uint32_t mul, uint32_t postdiv1, uint32_t postdiv2)
                  | (postdiv2 << PLL_PRIM_POSTDIV2_LSB));
     pll->pwr = PLL_PWR_DSMPD_BITS;
 }
+#endif
 
 static void
 clk_aux_setup(uint32_t clk_id, uint32_t aux_id)
