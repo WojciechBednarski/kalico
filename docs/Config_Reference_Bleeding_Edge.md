@@ -147,3 +147,24 @@ filament_diameter: 1.75
 fan_speed: 0.5
 #   Speed the fan should run at after finishing the brim
 ```
+
+## Mirrored steppers
+
+This feature requires Kalico firmware compiled with the "Support
+mirroring steps to mechanically coupled steppers" option. It is off by
+default: in `make menuconfig` select "Enable extra low-level
+configuration options" and then this option (it is not available on
+AVR). The firmware needs to be flashed to the micro-controller that
+drives the linked steppers. See
+[mirrored steppers](Bleeding_Edge.md#mirrored-steppers) for details.
+
+### [stepper_mirror]
+
+Enables the `SYNC_STEPPER_TO_AXIS` command, which drives the extra
+steppers of an axis (`[stepper_x1]`, `[stepper_z2]`, ...) from the step
+events of the axis' primary stepper. There are no configuration
+options.
+
+```
+[stepper_mirror]
+```

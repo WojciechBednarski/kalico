@@ -367,6 +367,19 @@ config WANT_STEPPER_OPTIMIZED_BOTH_EDGE
         performance by about 20% for traditional drivers (those that
         take a step only on the "rising" or "falling" level of the
         step pin).
+config WANT_STEPPER_MIRROR
+    bool "Support mirroring steps to mechanically coupled steppers" if LOW_LEVEL_OPTIONS
+    depends on !MACH_AVR
+    default n
+    help
+        Allow the host to drive stepper motors that are mechanically
+        coupled to another stepper (for example, the motors of an AWD
+        gantry) from that stepper's step events, so only one step
+        stream is computed, sent and scheduled for the group.  Used by
+        the [stepper_mirror] config section.  Mirrored motors step
+        notably faster, but every other stepper on this
+        micro-controller gets a small extra check on each step, so
+        only enable this on micro-controllers driving linked motors.
 
 # Support setting gpio state at startup
 config INITIAL_PINS

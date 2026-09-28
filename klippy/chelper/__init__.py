@@ -72,6 +72,8 @@ defs_stepcompress = """
         , int32_t set_next_step_dir_msgtag);
     void stepcompress_set_invert_sdir(struct stepcompress *sc
         , uint32_t invert_sdir);
+    int stepcompress_get_step_dir(struct stepcompress *sc);
+    void stepcompress_set_step_dir(struct stepcompress *sc, int sdir);
     int stepcompress_reset(struct stepcompress *sc, uint64_t last_step_clock);
     int stepcompress_set_last_position(struct stepcompress *sc
         , uint64_t clock, int64_t last_position);
@@ -116,6 +118,8 @@ defs_itersolve = """
     void itersolve_set_position(struct stepper_kinematics *sk
         , double x, double y, double z);
     double itersolve_get_commanded_pos(struct stepper_kinematics *sk);
+    void itersolve_set_commanded_pos(struct stepper_kinematics *sk
+        , double pos);
     double itersolve_get_gen_steps_pre_active(struct stepper_kinematics *sk);
     double itersolve_get_gen_steps_post_active(struct stepper_kinematics *sk);
 """

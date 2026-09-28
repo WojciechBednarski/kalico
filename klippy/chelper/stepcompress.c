@@ -287,10 +287,18 @@ stepcompress_get_oid(struct stepcompress *sc)
     return sc->oid;
 }
 
-int
+int __visible
 stepcompress_get_step_dir(struct stepcompress *sc)
 {
     return sc->next_step_dir;
+}
+
+// Set the direction itersolve expects the next step in (no step pending)
+void __visible
+stepcompress_set_step_dir(struct stepcompress *sc, int sdir)
+{
+    if (!sc->next_step_clock)
+        sc->next_step_dir = !!sdir;
 }
 
 // Determine the "print time" of the last_step_clock

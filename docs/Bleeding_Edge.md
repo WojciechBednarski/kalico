@@ -367,3 +367,84 @@ This feature enables a nonlinear relation between the advance and the filament f
 * The multiple interacting parameters make tuning more time-consuming.
 * For some extremely fast printers the requested extruder speed and acceleration can result in skipping.
 
+## Mirrored steppers
+
+### Overview
+
+On machines with several motors per axis (AWD CoreXY gantries, beds
+driven by multiple Z motors) every motor normally has its own step
+generation: the host computes and sends one step stream per motor, and
+the micro-controller schedules one step timer per motor, even though
+the motors of an axis always move identically. With mirrored steppers
+an extra stepper of an axis can be linked to the axis' primary
+stepper. While linked, the micro-controller toggles the extra
+stepper's step and dir pins from within the primary stepper's step
+events, so only one step stream is computed, sent and scheduled for
+the whole group, and all its motors step at practically the same
+instant.
+
+Mirroring support must be selected when building the firmware (it is
+off by default). Firmware built with it adds a small check to each step
+of every stepper on that micro-controller, linked or not (up to about
+2.5% of the maximum step rate on an STM32H723, 4-8% when also built with
+high-precision stepping), while a linked group
+steps notably faster than the same motors driven independently (two
+linked pairs: about 75% more steps per second than four independent
+motors). So only enable it for the micro-controller that drives the
+linked motors.
+
+Each stepper keeps its own configuration, driver (TMC) communication,
+enable pin and endstop, so it can be controlled individually again at
+any time by unlinking it.
+
+### Requirements
+
+* All steppers of a group must be on the same micro-controller, running
+  firmware built with mirroring support (see the
+  [config reference](Config_Reference_Bleeding_Edge.md#mirrored-steppers)).
+* A linked stepper must be an extra stepper of the primary's axis
+  (`stepper_x1` of `stepper_x`, `stepper_z2` of `stepper_z`, ...), with
+  the same step distance, step pulse settings and dir_pin polarity.
+  Wire the motors so that the same dir signal turns them the same way.
+* Up to three extra steppers can mirror one primary stepper.
+
+### Usage
+
+Link the extra steppers after homing and leveling, for example at the
+end of a `PRINT_START` macro:
+
+```
+[gcode_macro PRINT_START]
+gcode:
+    G28
+    Z_TILT_ADJUST
+    G28 Z
+    SYNC_STEPPER_TO_AXIS STEPPER=stepper_x1 AXIS=x
+    SYNC_STEPPER_TO_AXIS STEPPER=stepper_y1 AXIS=y
+    SYNC_STEPPER_TO_AXIS STEPPER=stepper_z1 AXIS=z
+    SYNC_STEPPER_TO_AXIS STEPPER=stepper_z2 AXIS=z
+```
+
+`SYNC_STEPPER_TO_AXIS` raises an error (aborting the macro) if a
+stepper can't be linked. Linking and unlinking wait for all queued
+moves to complete, which causes a short pause in motion.
+
+### Behavior while linked
+
+* Homing and probing moves (`G28`, `PROBE`, `BED_MESH_CALIBRATE`, ...)
+  that involve a linked stepper unlink it first, as endstops must be
+  able to stop each motor individually. Z adjustments (`Z_TILT_ADJUST`,
+  `QUAD_GANTRY_LEVEL`, with any probing method) unlink the Z group too,
+  as they move each Z motor on its own. Any other endstop or probe check
+  that stops a linked stepper (for example a BLTouch self test) also
+  unlinks it. Link again after such commands.
+* A linked group shares one enable state: disabling or enabling one of
+  its motors (for example with `SET_STEPPER_ENABLE`) applies to all of
+  them.
+* A linked extra stepper can't be moved on its own (`FORCE_MOVE`,
+  `STEPPER_BUZZ`); unlink it first. Moving the primary stepper this way
+  moves the whole group.
+* The micro-controller doesn't update the position of a linked extra
+  stepper while it mirrors; the position is brought up to date when it
+  is unlinked.
+

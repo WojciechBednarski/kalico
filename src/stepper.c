@@ -30,6 +30,12 @@ DECL_CONSTANT("STEPPER_STEP_BOTH_EDGE", 1);
  #define HAVE_AVR_OPTIMIZATION 0
 #endif
 
+#if CONFIG_WANT_STEPPER_MIRROR
+ // Maximum number of steppers mirroring a single stepper
+ #define STEPPER_MIRROR_MAX 3
+ DECL_CONSTANT("STEPPER_MIRROR", STEPPER_MIRROR_MAX);
+#endif
+
 struct stepper_move {
     struct move_node node;
     uint32_t interval;
@@ -60,6 +66,11 @@ struct stepper {
 #else
     int16_t add;
 #endif
+#if CONFIG_WANT_STEPPER_MIRROR
+    // Checked on every step; in the first 32 bytes (and in padding) so
+    // Cortex-M0 can load it with a single instruction
+    uint8_t mirror_count;
+#endif
     uint32_t count;
     uint32_t next_step_time, step_pulse_ticks;
     struct gpio_out step_pin, dir_pin;
@@ -68,6 +79,15 @@ struct stepper {
     struct trsync_signal stop_signal;
     // gcc (pre v6) does better optimization when uint8_t are bitfields
     uint8_t flags : 8;
+#if CONFIG_WANT_STEPPER_MIRROR
+    // Steppers whose step/dir pins are driven by this stepper's events
+    struct stepper *mirrors[STEPPER_MIRROR_MAX];
+    // Copies of their step pins (saves a pointer lookup on each step)
+    struct gpio_out mirror_step[STEPPER_MIRROR_MAX];
+    // The stepper driving this stepper's pins (if any)
+    struct stepper *mirror_of;
+    uint32_t mirror_start_pos;
+#endif
 };
 
 enum { POSITION_BIAS=0x40000000 };
@@ -108,6 +128,18 @@ inc_interval(struct stepper *s)
 #if CONFIG_HIGH_PREC_STEP
     s->interval += s->add;
     s->add += s->add2;
+#endif
+}
+
+// Toggle the direction pin of a stepper (and of any steppers mirroring it)
+static inline void
+stepper_dir_toggle(struct stepper *s)
+{
+    gpio_out_toggle_noirq(s->dir_pin);
+#if CONFIG_WANT_STEPPER_MIRROR
+    uint_fast8_t i;
+    for (i = 0; i < s->mirror_count; i++)
+        gpio_out_toggle_noirq(s->mirrors[i]->dir_pin);
 #endif
 }
 
@@ -179,7 +211,7 @@ stepper_load_next(struct stepper *s)
             if (s->flags & SF_SINGLE_SCHED)
                 while (timer_is_before(timer_read_time(), min_next_time))
                     ;
-            gpio_out_toggle_noirq(s->dir_pin);
+            stepper_dir_toggle(s);
             uint32_t curtime = timer_read_time();
             min_next_time = curtime + s->step_pulse_ticks;
             if (timer_is_before(s->time.waketime, min_next_time))
@@ -190,7 +222,7 @@ stepper_load_next(struct stepper *s)
 
     // Set new direction (if needed)
     if (need_dir_change)
-        gpio_out_toggle_noirq(s->dir_pin);
+        stepper_dir_toggle(s);
     return SF_RESCHEDULE;
 }
 
@@ -200,12 +232,40 @@ stepper_load_next(struct stepper *s)
  DECL_CONSTANT("STEPPER_OPTIMIZED_EDGE", EDGE_STEP_TICKS);
 #endif
 
+// Number of steppers mirroring this stepper
+static __always_inline uint_fast8_t
+stepper_mirror_count(struct stepper *s)
+{
+#if CONFIG_WANT_STEPPER_MIRROR
+    return s->mirror_count;
+#else
+    return 0;
+#endif
+}
+
+// Toggle the step pins of any steppers mirroring this stepper
+static __always_inline void
+stepper_mirror_step(struct stepper *s, uint_fast8_t count)
+{
+#if CONFIG_WANT_STEPPER_MIRROR
+    // Keep the loop out of the path taken by steppers that aren't mirrored
+    if (likely(!count))
+        return;
+    uint_fast8_t i;
+    for (i = 0; i < count; i++)
+        gpio_out_toggle_noirq(s->mirror_step[i]);
+#endif
+}
+
 // Optimized step function to step on each step pin edge
 static uint_fast8_t
 stepper_event_edge(struct timer *t)
 {
     struct stepper *s = container_of(t, struct stepper, time);
+    // Read before the pin write, which the compiler must assume aliases it
+    uint_fast8_t mirror_count = stepper_mirror_count(s);
     gpio_out_toggle_noirq(s->step_pin);
+    stepper_mirror_step(s, mirror_count);
     uint32_t count = s->count - 1;
     if (likely(count)) {
         s->count = count;
@@ -258,7 +318,10 @@ static uint_fast8_t
 stepper_event_full(struct timer *t)
 {
     struct stepper *s = container_of(t, struct stepper, time);
+    // Read before the pin write, which the compiler must assume aliases it
+    uint_fast8_t mirror_count = stepper_mirror_count(s);
     gpio_out_toggle_noirq(s->step_pin);
+    stepper_mirror_step(s, mirror_count);
     uint32_t curtime = timer_read_time();
     uint32_t min_next_time = curtime + s->step_pulse_ticks;
     uint32_t count = s->count - 1;
@@ -341,6 +404,10 @@ static void
 enqueue_move(struct stepper *s, struct stepper_move *m)
 {
     irq_disable();
+#if CONFIG_WANT_STEPPER_MIRROR
+    if (s->mirror_of)
+        shutdown("Can't step a mirrored stepper");
+#endif
     uint8_t flags = s->flags;
     if (!!(flags & SF_LAST_DIR) != !!(flags & SF_NEXT_DIR)) {
         flags ^= SF_LAST_DIR;
@@ -510,11 +577,84 @@ command_stepper_get_position(uint32_t *args)
 }
 DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
 
+#if CONFIG_WANT_STEPPER_MIRROR
+// Check that a stepper has no pending steps (caller must disable irqs)
+static int
+stepper_is_idle(struct stepper *s)
+{
+    return !s->count && move_queue_empty(&s->mq);
+}
+
+// Stop driving a stepper from its primary (caller must disable irqs)
+static void
+stepper_mirror_detach(struct stepper *m)
+{
+    struct stepper *s = m->mirror_of;
+    uint_fast8_t i = 0;
+    while (s->mirrors[i] != m)
+        i++;
+    s->mirror_count--;
+    s->mirrors[i] = s->mirrors[s->mirror_count];
+    s->mirror_step[i] = s->mirror_step[s->mirror_count];
+    // Credit the stepper with the steps it took while mirroring
+    uint32_t pos = (stepper_get_position(m) + stepper_get_position(s)
+                    - m->mirror_start_pos);
+    m->position = m->flags & SF_LAST_DIR ? pos : -pos;
+    gpio_out_write(m->dir_pin, !!(m->flags & SF_LAST_DIR));
+    m->mirror_of = NULL;
+}
+
+// Drive stepper 'oid' from the step events of stepper 'primary_oid'
+void
+command_stepper_mirror_link(uint32_t *args)
+{
+    struct stepper *m = stepper_oid_lookup(args[0]);
+    struct stepper *s = stepper_oid_lookup(args[1]);
+    if (m == s || m->mirror_of || m->mirror_count || s->mirror_of
+        || s->mirror_count >= STEPPER_MIRROR_MAX
+        || (m->flags ^ s->flags) & (SF_INVERT_STEP | SF_SINGLE_SCHED))
+        shutdown("Invalid stepper mirror");
+    irq_disable();
+    if (!stepper_is_idle(m) || !stepper_is_idle(s))
+        shutdown("Can't mirror stepper while active");
+    // Pins are only toggled while mirroring, so start from the same level
+    gpio_out_write(m->dir_pin, !!(s->flags & SF_LAST_DIR));
+    m->mirror_start_pos = stepper_get_position(s);
+    m->mirror_of = s;
+    s->mirrors[s->mirror_count] = m;
+    s->mirror_step[s->mirror_count] = m->step_pin;
+    s->mirror_count++;
+    irq_enable();
+}
+DECL_COMMAND(command_stepper_mirror_link,
+             "stepper_mirror_link oid=%c primary_oid=%c");
+
+// Return stepper 'oid' to independent control
+void
+command_stepper_mirror_unlink(uint32_t *args)
+{
+    struct stepper *m = stepper_oid_lookup(args[0]);
+    irq_disable();
+    if (m->mirror_of) {
+        if (!stepper_is_idle(m->mirror_of))
+            shutdown("Can't unmirror stepper while active");
+        stepper_mirror_detach(m);
+    }
+    irq_enable();
+}
+DECL_COMMAND(command_stepper_mirror_unlink, "stepper_mirror_unlink oid=%c");
+#endif
+
 // Stop all moves for a given stepper (caller must disable IRQs)
 static void
 stepper_stop(struct trsync_signal *tss, uint8_t reason)
 {
     struct stepper *s = container_of(tss, struct stepper, stop_signal);
+#if CONFIG_WANT_STEPPER_MIRROR
+    if (s->mirror_of)
+        // A stepper stopped on its own must not keep following its primary
+        stepper_mirror_detach(s);
+#endif
     sched_del_timer(&s->time);
     s->next_step_time = s->time.waketime = 0;
     s->position = -stepper_get_position(s);
@@ -526,6 +666,16 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
         || (HAVE_AVR_OPTIMIZATION && s->flags & SF_OPTIMIZED_PATH))
         // Must return step pin to "unstep" state
         gpio_out_write(s->step_pin, s->flags & SF_INVERT_STEP);
+#if CONFIG_WANT_STEPPER_MIRROR
+    // Mirroring steppers must keep the same pin state as their primary
+    uint_fast8_t i;
+    for (i = 0; i < s->mirror_count; i++) {
+        struct stepper *m = s->mirrors[i];
+        gpio_out_write(m->dir_pin, 0);
+        if (!(m->flags & SF_SINGLE_SCHED))
+            gpio_out_write(m->step_pin, m->flags & SF_INVERT_STEP);
+    }
+#endif
     while (!move_queue_empty(&s->mq)) {
         struct move_node *mn = move_queue_pop(&s->mq);
         struct stepper_move *m = container_of(mn, struct stepper_move, node);

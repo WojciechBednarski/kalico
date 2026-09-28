@@ -1,0 +1,7 @@
+# Test that a stepper can only mirror the primary stepper of its own axis
+CONFIG stepper_mirror.cfg
+DICTIONARY stm32h723.dict
+SHOULD_FAIL
+
+G28
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_y1 AXIS=x

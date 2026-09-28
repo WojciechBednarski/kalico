@@ -1922,6 +1922,25 @@ reset the homing information. Manually moving a disabled stepper may
 cause the machine to operate the motor outside of safe limits. This
 can lead to damage to axis components, hot ends, and print surface.
 
+### [stepper_mirror]
+
+The following command is available when a
+[stepper_mirror config section](Config_Reference_Bleeding_Edge.md#stepper_mirror)
+is enabled.
+
+#### SYNC_STEPPER_TO_AXIS
+`SYNC_STEPPER_TO_AXIS STEPPER=<config_name> AXIS=[x|y|z]`: Drive the
+given extra stepper of an axis (for example, `stepper_x1`) from the
+step events of the axis' primary stepper (`stepper_x`), so only one
+step stream is generated, sent and scheduled for both motors. The
+motors must be mechanically coupled, the axis must be homed and both
+steppers must be enabled. Homing and probing moves that involve a
+linked stepper unlink it automatically, so this command is typically
+issued at the end of a `PRINT_START` macro, after homing and leveling.
+Use `AXIS=` (an empty value) to return the stepper to independent
+control. See [mirrored steppers](Bleeding_Edge.md#mirrored-steppers)
+for details.
+
 ### [temperature_fan]
 
 The following command is available when a
