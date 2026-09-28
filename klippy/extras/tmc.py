@@ -575,6 +575,9 @@ class TMCCommandHelper:
     def _handle_sync_mcu_pos(self, stepper):
         if stepper.get_name() != self.stepper_name:
             return
+        if stepper.get_mirror_primary() is not None:
+            # Its mcu position is only updated when it stops mirroring
+            return
         try:
             driver_phase = self._query_phase()
         except self.printer.command_error as e:

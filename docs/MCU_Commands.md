@@ -252,6 +252,17 @@ only of interest to developers looking to gain insight into Kalico.
   number of steps generated with dir=1 minus the total number of steps
   generated with dir=0.
 
+* `stepper_mirror_link oid=%c primary_oid=%c` : This command makes the
+  micro-controller toggle the step and dir pins of stepper 'oid' each
+  time it toggles those of stepper 'primary_oid', instead of scheduling
+  steps for 'oid' itself. Both steppers must be idle. This command is
+  only available when the micro-controller reports the "STEPPER_MIRROR"
+  constant (the maximum number of steppers mirroring one stepper).
+
+* `stepper_mirror_unlink oid=%c` : This command returns stepper 'oid'
+  to independent operation (if it was mirroring another stepper) and
+  adds the steps taken while mirroring to its position.
+
 * `endstop_home oid=%c clock=%u sample_ticks=%u sample_count=%c
   rest_ticks=%u pin_value=%c` : This command is used during stepper
   "homing" operations. To use this command a 'config_endstop' command

@@ -1,0 +1,74 @@
+# Test mirroring the extra steppers of an axis onto its primary stepper
+CONFIG stepper_mirror.cfg
+DICTIONARY stm32h723.dict
+
+# Home and level, then link the extra motors of each axis
+G28
+Z_TILT_ADJUST
+G28 Z
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_x1 AXIS=x
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_y1 AXIS=y
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_z1 AXIS=z
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_z2 AXIS=z
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_x1 == "stepper_x"}'
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_y1 == "stepper_y"}'
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_z1 == "stepper_z"}'
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_z2 == "stepper_z"}'
+
+# Linking again is a no-op
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_x1 AXIS=x
+ASSERT TEST='{printer.stepper_mirror.linked|length == 4}'
+
+# Moves while linked
+G1 X20 Y30 Z5 F6000
+G1 X180 Y150 F12000
+G1 X10 Y10 Z2
+
+# Unlink and relink one motor of a group
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_z2 AXIS=
+ASSERT TEST='{"stepper_z2" not in printer.stepper_mirror.linked}'
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_z1 == "stepper_z"}'
+G1 Z4
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_z2 AXIS=z
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_z2 == "stepper_z"}'
+G1 Z6
+
+# A linked group shares one enable state (this move turns both corexy motors)
+SET_STEPPER_ENABLE STEPPER=stepper_y1 ENABLE=0
+ASSERT TEST='{not printer.stepper_enable.steppers.stepper_y}'
+ASSERT TEST='{printer.stepper_enable.steppers.stepper_x}'
+G1 X50 Y20
+M400
+ASSERT TEST='{printer.stepper_enable.steppers.stepper_y}'
+ASSERT TEST='{printer.stepper_enable.steppers.stepper_y1}'
+M84
+
+# Homing and probing moves unlink automatically
+G28
+ASSERT TEST='{printer.stepper_mirror.linked|length == 0}'
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_z1 AXIS=z
+PROBE
+ASSERT TEST='{printer.stepper_mirror.linked|length == 0}'
+G1 Z10
+
+# Z adjustments unlink the Z group even without probing moves
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_z1 AXIS=z
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_z2 AXIS=z
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_x1 AXIS=x
+Z_TILT_ADJUST METHOD=manual
+TESTZ Z=-1
+ACCEPT
+TESTZ Z=-1
+ACCEPT
+TESTZ Z=-1
+ACCEPT
+ASSERT TEST='{"stepper_z1" not in printer.stepper_mirror.linked}'
+ASSERT TEST='{"stepper_z2" not in printer.stepper_mirror.linked}'
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_x1 == "stepper_x"}'
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_x1 AXIS=
+G1 Z10
+
+# A force move of a primary moves its whole linked group
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_x1 AXIS=x
+FORCE_MOVE STEPPER=stepper_x DISTANCE=5 VELOCITY=10
+ASSERT TEST='{printer.stepper_mirror.linked.stepper_x1 == "stepper_x"}'

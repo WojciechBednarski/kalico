@@ -58,6 +58,7 @@ void stepcompress_history_expire(struct stepcompress *sc, uint64_t end_clock);
 void stepcompress_free(struct stepcompress *sc);
 uint32_t stepcompress_get_oid(struct stepcompress *sc);
 int stepcompress_get_step_dir(struct stepcompress *sc);
+void stepcompress_set_step_dir(struct stepcompress *sc, int sdir);
 void stepcompress_set_time(struct stepcompress *sc
                            , double time_offset, double mcu_freq);
 int stepcompress_append(struct stepcompress *sc, int sdir

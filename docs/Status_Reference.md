@@ -565,6 +565,16 @@ The following information is available in the `stepper_enable` object (this
 object is available if any stepper is defined):
 - `steppers["<stepper>"]`: Returns True if the given stepper is enabled.
 
+## stepper_mirror
+
+The following information is available in the `stepper_mirror` object
+(this object is available if a
+[stepper_mirror config section](Config_Reference_Bleeding_Edge.md#stepper_mirror)
+is defined):
+- `linked["<stepper>"]`: The name of the primary stepper that the given
+  stepper currently mirrors. Steppers that are not linked are not
+  listed.
+
 ## system_stats
 
 The following information is available in the `system_stats` object

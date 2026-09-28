@@ -71,6 +71,10 @@ class MCU_stepper:
         self._stepper_kinematics = None
         self._itersolve_check_active = ffi_lib.itersolve_check_active
         self._trapq = ffi_main.NULL
+        self._max_mirrors = 0
+        self._mirror_link_cmd = self._mirror_unlink_cmd = None
+        self._mirror_primary = None
+        self._mirror_trapq = None
         printer.register_event_handler(
             "klippy:connect", self._query_mcu_position
         )
@@ -155,6 +159,18 @@ class MCU_stepper:
         self._mcu.add_config_cmd(
             "reset_step_clock oid=%d clock=0" % (self._oid,), on_restart=True
         )
+        self._max_mirrors = int(constants.get("STEPPER_MIRROR", "0"))
+        if self._max_mirrors:
+            # A reconnected mcu may still be mirroring from a prior session
+            self._mcu.add_config_cmd(
+                "stepper_mirror_unlink oid=%d" % (self._oid,), on_restart=True
+            )
+            self._mirror_link_cmd = self._mcu.lookup_command(
+                "stepper_mirror_link oid=%c primary_oid=%c"
+            )
+            self._mirror_unlink_cmd = self._mcu.lookup_command(
+                "stepper_mirror_unlink oid=%c"
+            )
         if self._high_precision_stepcompr:
             try:
                 step_cmd_tag = self._mcu.lookup_command(
@@ -211,6 +227,52 @@ class MCU_stepper:
 
     def get_dir_inverted(self):
         return self._invert_dir, self._orig_invert_dir
+
+    def is_step_inverted(self):
+        return self._invert_step
+
+    def get_max_mirrors(self):
+        return self._max_mirrors
+
+    def get_mirror_primary(self):
+        return self._mirror_primary
+
+    def link_mirror(self, primary):
+        # Caller must ensure both steppers have completed all queued steps
+        self._mirror_link_cmd.send([self._oid, primary.get_oid()])
+        self._mirror_trapq = self.set_trapq(None)
+        self._mirror_primary = primary
+
+    def unlink_mirror(self):
+        # Caller must ensure the primary has completed all queued steps
+        self._mirror_unlink_cmd.send([self._oid])
+        primary, self._mirror_primary = self._mirror_primary, None
+        try:
+            # The mcu credited this stepper with the steps taken while mirroring
+            self._query_mcu_position()
+        finally:
+            self._end_mirror(primary)
+
+    def _end_mirror(self, primary):
+        # It took exactly the primary's steps, so it continues from the
+        # primary's step grid and step direction
+        mcu_pos = self.get_mcu_position()
+        ffi_main, ffi_lib = chelper.get_ffi()
+        ffi_lib.itersolve_set_commanded_pos(
+            self._stepper_kinematics, primary.get_commanded_position()
+        )
+        ffi_lib.stepcompress_set_step_dir(
+            self._stepqueue,
+            ffi_lib.stepcompress_get_step_dir(primary._stepqueue),
+        )
+        self._set_mcu_position(mcu_pos)
+        self.set_trapq(self._mirror_trapq)
+
+    def _mirror_error(self):
+        return self._mcu.get_printer().command_error(
+            "Stepper '%s' is mirroring '%s' and can't move on its own"
+            % (self._name, self._mirror_primary.get_name())
+        )
 
     def set_dir_inverted(self, invert_dir):
         invert_dir = not not invert_dir
@@ -272,6 +334,8 @@ class MCU_stepper:
         return self._stepper_kinematics
 
     def set_stepper_kinematics(self, sk):
+        if self._mirror_primary is not None:
+            raise self._mirror_error()
         old_sk = self._stepper_kinematics
         mcu_pos = 0
         if old_sk is not None:
@@ -290,7 +354,16 @@ class MCU_stepper:
             raise error("Internal error in stepcompress")
         data = (self._reset_cmd_tag, self._oid, 0)
         ffi_lib.syncemitter_queue_msg(self._syncemitter, 0, data, len(data))
-        self._query_mcu_position()
+        primary, self._mirror_primary = self._mirror_primary, None
+        try:
+            self._query_mcu_position()
+        finally:
+            if primary is not None:
+                # The mcu stops mirroring any stepper halted by a trigger
+                self._end_mirror(primary)
+                self._mcu.get_printer().send_event(
+                    "stepper:mirror_stopped", self, primary
+                )
 
     def _query_mcu_position(self):
         if self._mcu.is_fileoutput() or self._mcu.non_critical_disconnected:
@@ -317,6 +390,8 @@ class MCU_stepper:
         ffi_main, ffi_lib = chelper.get_ffi()
         if tq is None:
             tq = ffi_main.NULL
+        if tq != ffi_main.NULL and self._mirror_primary is not None:
+            raise self._mirror_error()
         ffi_lib.itersolve_set_trapq(
             self._stepper_kinematics, tq, self._step_dist
         )

@@ -1,0 +1,8 @@
+# Test that a mirrored stepper can't be moved on its own
+CONFIG stepper_mirror.cfg
+DICTIONARY stm32h723.dict
+SHOULD_FAIL
+
+G28
+SYNC_STEPPER_TO_AXIS STEPPER=stepper_x1 AXIS=x
+FORCE_MOVE STEPPER=stepper_x1 DISTANCE=5 VELOCITY=10

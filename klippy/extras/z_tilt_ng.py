@@ -60,6 +60,10 @@ class ZAdjustHelper:
     def adjust_steppers(self, adjustments, speed):
         toolhead = self.printer.lookup_object("toolhead")
         gcode = self.printer.lookup_object("gcode")
+        stepper_mirror = self.printer.lookup_object("stepper_mirror", None)
+        if stepper_mirror is not None:
+            # Each z stepper is moved on its own, so none may be mirrored
+            stepper_mirror.unlink_steppers(self.z_steppers, "Z adjustment")
         curpos = toolhead.get_position()
         # Report on movements
         stepstrs = [
