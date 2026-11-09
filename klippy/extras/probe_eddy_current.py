@@ -8,7 +8,7 @@ import math
 
 from klippy import gcode, mcu
 
-from . import manual_probe, probe
+from . import probe
 
 
 # Tool for calibrating the sensor Z detection and applying that calibration
@@ -206,10 +206,16 @@ class EddyCalibration:
 
     def cmd_EDDY_CALIBRATE(self, gcmd):
         self.probe_speed = gcmd.get_float("PROBE_SPEED", 5.0, above=0.0)
-        # Start manual probe
-        manual_probe.ManualProbeHelper(
-            self.printer, gcmd, self.post_manual_probe
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
+        reference = probe.ProbeList.get_list(self.printer).get_command_probe(
+            gcmd, default_probe_name="manual"
         )
+        offsets = reference.get_offsets()
+        position = list(reference.run_probe(gcmd))
+        position[0] += offsets[0]
+        position[1] += offsets[1]
+        position[2] -= offsets[2]
+        self.post_manual_probe(position)
 
 
 class EddyDistanceCollector(probe.ProbeDistanceCollector):
@@ -352,7 +358,7 @@ class EddyEndstopWrapper:
     def probing_move(self, pos, speed, gcmd):
         # Perform probing move
         phoming = self._printer.lookup_object("homing")
-        trig_pos = phoming.probing_move(self, pos, speed)
+        trig_pos = phoming.probing_move(self, pos, speed, gcmd)
         if not self._trigger_time:
             return trig_pos
         # Wait for samples to arrive
@@ -398,14 +404,14 @@ class EddyEndstopWrapper:
     def begin_collect_distance(self):
         return EddyDistanceCollector(self)
 
-    def multi_probe_begin(self):
+    def multi_probe_begin(self, context):
         if not self._calibration.is_calibrated():
             raise self._printer.command_error(
                 "Must calibrate probe_eddy_current first"
             )
         self._start_measurements()
 
-    def multi_probe_end(self):
+    def multi_probe_end(self, context):
         self._stop_measurements()
 
     def probe_prepare(self, hmove):

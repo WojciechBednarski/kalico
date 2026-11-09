@@ -2,6 +2,8 @@ from klippy.configfile import ConfigWrapper as RealConfigWrapper
 from klippy.configfile import error as ConfigError
 from klippy.mcu import MIN_SCHEDULE_TIME_INIT  # noqa: F401
 
+from ..homing import Homing
+
 
 class ConfigWrapper(RealConfigWrapper):
     def __init__(self, printer, name, contents, fallback=None):
@@ -83,3 +85,29 @@ def get_tmc_current_helper(stepper):
     Compatibility layer for Kalico and Klipper.
     """
     return stepper.get_tmc_current_helper()
+
+
+def create_homing(printer, gcmd):
+    """Create homing state for the current command."""
+    return Homing(printer, gcmd)
+
+
+def check_not_calibrating(heater):
+    """Reject changes to a calibrating heater; an unbound heater is allowed."""
+    if heater is not None:
+        heater.check_not_calibrating()
+
+
+def heater_calibration(heater):
+    """Reserve a heater for calibration and turn it off if the scope fails."""
+    return heater.calibration()
+
+
+def wait_while(gcmd, condition_cb, interval):
+    """Wait interruptibly while condition_cb(eventtime) is true."""
+    return gcmd.wait_while(condition_cb, interval=interval)
+
+
+def sleep(gcmd, duration):
+    """Sleep interruptibly for duration seconds."""
+    return gcmd.sleep(duration)

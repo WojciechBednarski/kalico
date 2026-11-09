@@ -164,17 +164,24 @@ The following commands are available when the
 section](Config_Reference.md#axis_twist_compensation) is enabled.
 
 #### AXIS_TWIST_COMPENSATION_CALIBRATE
-`AXIS_TWIST_COMPENSATION_CALIBRATE [PROBE=<name>] [AXIS=<X|Y>]
-[SAMPLE_COUNT=<value>] [<probe_parameter>=<value>]`:
+`AXIS_TWIST_COMPENSATION_CALIBRATE [PROBE=<name>]
+[REFERENCE_PROBE=<name>] [<probe_parameter>=<value>]`:
 
-Calibrates axis twist compensation by specifying the target axis or
-enabling automatic calibration.
+Measure a complete mesh with the target probe, followed by a complete mesh
+with the reference probe. Omitted `PROBE` selects the default probe.
+`REFERENCE_PROBE` overrides the target's configured `reference_probe`, which
+otherwise inherits from the base section and defaults to `manual`.
 
-- **SAMPLE_COUNT:** Number of points tested during the calibration.
-If not specified, it defaults to 3.
+Mesh settings come from `[axis_twist_compensation]`, with overrides from
+`[axis_twist_compensation <target>]` when present. A target does not need an
+existing named section. The resulting reference-minus-target mesh has its
+mean removed and becomes active immediately. Run `SAVE_CONFIG` to store the
+mesh, its layout, and selected reference under the target's named section.
 
-- **AXIS:** Define the axis (`X` or `Y`) for which the twist compensation
-will be calibrated. If not specified, the axis defaults to `'X'`.
+During a manual pass, use `TESTZ` and `ACCEPT` at each point, or `ABORT` to
+cancel. Cancellation or probing errors restore the previous map. A calling
+macro waits for calibration to finish before continuing; cancellation or an
+error stops it. `AXIS` and `SAMPLE_COUNT` are no longer supported.
 
 ### [bed_mesh]
 
@@ -851,7 +858,10 @@ software (see
 clears any error state from the micro-controller.
 
 #### HEATER_INTERRUPT
-`HEATER_INTERRUPT`: Interrupts a TEMPERATURE_WAIT command.
+`HEATER_INTERRUPT`: Interrupts active temperature waits, MPC
+calibration waits, and Python macro `wait_while`, `wait_until`, and
+`sleep` helpers. Commands started after `HEATER_INTERRUPT` are not
+affected.
 
 #### LOG_ROLLOVER
 `LOG_ROLLOVER`: Trigger a klippy.log rollover and generate a new log file.
@@ -1133,7 +1143,8 @@ override.
 #### INDX_SET_IR_SENSOR_PARAMS
 `INDX_SET_IR_SENSOR_PARAMS EXPONENT=<value> OBJ_GAIN=<value>
 BRACKET_GAIN=<value>`: Override the IR sensor tuning parameters
-stored in the sensor EEPROM. These should not normally be changed.
+stored in the sensor EEPROM. EXPONENT must be above 0. These should
+not normally be changed.
 
 #### INDX_SET_CYCLE_LIMIT
 `INDX_SET_CYCLE_LIMIT LIMIT=<value>`: Limit the coil driver duty
@@ -1314,14 +1325,19 @@ See [Tap Performance Calibration](Load_Cell.md#tap-performance-calibration) and 
 
 ### [manual_probe]
 
-The manual_probe module is automatically loaded.
+The manual_probe module is automatically loaded and registers a probe named
+`manual`. It becomes the default probe when no other default probe is selected.
+Use `MANUAL_PROBE` for standalone manual probing, or `PROBE=manual` to select
+it in calibration commands such as `BED_MESH_CALIBRATE`. `METHOD=manual`
+remains supported by those calibration commands. The manual probe does not
+register the standard probe commands.
 
 #### MANUAL_PROBE
-`MANUAL_PROBE [SPEED=<speed>]`: Run a helper script useful for
+`MANUAL_PROBE [PROBE=<name>] [SPEED=<speed>]`: Run a helper script useful for
 measuring the height of the nozzle at a given location. If SPEED is
 specified, it sets the speed of TESTZ commands (the default is
-5mm/s). During a manual probe, the following additional commands are
-available:
+5mm/s). The probe defaults to `manual`; use `PROBE` to select another probe.
+During a manual probe, the following additional commands are available:
 - `ACCEPT`: This command accepts the current Z position and concludes
   the manual probing tool.
 - `ABORT`: This command terminates the manual probing tool.
@@ -1331,11 +1347,16 @@ available:
   .1mm. The value may also be `+`, `-`, `++`, or `--` to move the
   nozzle up or down an amount relative to previous attempts.
 
+Manual probing waits until each point is accepted or probing is aborted before
+the calling command or macro continues. Send `TESTZ`, `ACCEPT`, and `ABORT`
+through the API (for example, a printer web interface). Commands in the same
+pseudo-TTY stream remain queued behind the waiting command.
+
 #### Z_ENDSTOP_CALIBRATE
-`Z_ENDSTOP_CALIBRATE [SPEED=<speed>]`: Run a helper script useful for
-calibrating a Z position_endstop config setting. See the MANUAL_PROBE
-command for details on the parameters and the additional commands
-available while the tool is active.
+`Z_ENDSTOP_CALIBRATE [PROBE=<name>] [SPEED=<speed>]`: Calibrate a Z
+position_endstop config setting. The probe defaults to `manual`; use `PROBE`
+to select another probe. See the MANUAL_PROBE command for details on the
+parameters and the additional commands available while the tool is active.
 
 #### Z_OFFSET_APPLY_ENDSTOP
 `Z_OFFSET_APPLY_ENDSTOP`: Take the current Z Gcode offset (aka,
@@ -1673,9 +1694,10 @@ median, and standard deviation of multiple probe samples. By default,
 their equivalent setting in the probe config section.
 
 #### PROBE_CALIBRATE
-`PROBE_CALIBRATE [PROBE=<name>] [SPEED=<speed>] [<probe_parameter>=<value>]`: Run a
-helper script useful for calibrating the probe's z_offset. See the
-PROBE command for details on the optional probe parameters. See the
+`PROBE_CALIBRATE [PROBE=<name>] [REFERENCE_PROBE=<name>]
+[SPEED=<speed>] [<probe_parameter>=<value>]`: Run a helper script useful
+for calibrating the probe's z_offset. `REFERENCE_PROBE` selects the
+reference probe, which defaults to `manual`. See the PROBE command for details on the optional probe parameters. See the
 MANUAL_PROBE command for details on the SPEED parameter and the
 additional commands available while the tool is active. Please note,
 the PROBE_CALIBRATE command uses the speed variable to move in XY
@@ -1715,11 +1737,12 @@ The following commands are available when a
 is enabled.
 
 #### PROBE_EDDY_CURRENT_CALIBRATE
-`PROBE_EDDY_CURRENT_CALIBRATE CHIP=<config_name>`: This starts a tool
-that calibrates the sensor resonance frequencies to corresponding Z
+`PROBE_EDDY_CURRENT_CALIBRATE CHIP=<config_name> [PROBE=<name>]`:
+This starts a tool that calibrates the sensor resonance frequencies to corresponding Z
 heights. The tool will take a couple of minutes to complete. After
 completion, use the SAVE_CONFIG command to store the results in the
-printer.cfg file.
+printer.cfg file. The reference probe defaults to `manual`; use `PROBE` to
+select another probe.
 
 #### LDC_CALIBRATE_DRIVE_CURRENT
 `LDC_CALIBRATE_DRIVE_CURRENT CHIP=<config_name>` This tool will
@@ -2394,6 +2417,52 @@ the config.
 - `REF_TEMP` manually overrides the reference temperature typically set during
 homing (for use in e.g. non-standard homing routines) - will be reset
 automatically upon homing.
+
+#### Z_THERMAL_ADJUST_CALIBRATE
+`Z_THERMAL_ADJUST_CALIBRATE CALIBRATION=NOZZLE HEATER=<heater>
+ [COMPONENT=name] [PROBE=<probe>] [MIN_TEMP=<value>] [MAX_TEMP=<value>]
+ [MEASUREMENTS=<count>] [SOAK_TIME=<seconds>]
+ [Z_LIFT=<mm>] [Z_LIFT_SPEED=<mm/s>]`: Measures the
+thermal expansion of the nozzle and calculates the `temp_coeff` for the
+`[z_thermal_adjust]` section. The printer must be homed and the nozzle must be
+positioned over a clean spot on the bed where probing is possible.
+The command heats the nozzle from `MIN_TEMP` up to `MAX_TEMP`, and then back
+down to `MIN_TEMP` for a complete thermal cycle. It splits the temperature range
+into `MEASUREMENTS` steps. Each step starts with a pause for `SOAK_TIME`, probes
+to measure the nozzle and lifts the toolhead by `Z_LIFT` to resume heating. The
+heater is turned off when the command finishes or fails.
+A linear regression of the probe results against temperature gives the coefficient,
+which is reported and stored as the section's `temp_coeff`. Run `SAVE_CONFIG`
+to write it to the config file and restart. See also
+[Nozzle Temperature Compensation](Load_Cell.md#nozzle-temperature-compensation).
+
+- `CALIBRATION`: The type of calibration routine to run. Required. Only `NOZZLE` is currently
+supported; `FRAME` is reserved for future use.
+- `HEATER`: The name of the heater to calibrate with, typically `extruder`. Required.
+- `COMPONENT`: if multiple thermal adjustment are defined use `COMPONENT` to
+specify which one to calibrate.
+- `PROBE`: The probe to measure with, if more than one probe is configured.
+- `MIN_TEMP`: The lowest temperature to measure at. The default is 140.
+- `MAX_TEMP`: The highest temperature to measure at. It must be greater than
+`MIN_TEMP`. The default is 250.
+- `MEASUREMENTS`: The number of distinct temperatures to measure
+at between `MIN_TEMP` and `MAX_TEMP`, inclusive. The minimum is 2 and the
+default is 10. Each temperature is measured twice, once while heating and 
+once while cooling.
+- `SOAK_TIME`: Seconds to wait after the heater reaches each temperature, to
+let the nozzle and heatbreak reach thermal equilibrium. The default is 20.
+- `Z_LIFT`: Distance in mm to raise the toolhead after each probe. The default
+is 10.
+- `Z_LIFT_SPEED`: Speed in mm/s of the lift move. The default is 5.
+
+When the calculation completes the command reports the total elongation and
+temperature range measured and the resulting temperature coefficient. It also
+saves a plot of the measurements and fitted line as
+`nozzle_elongation_YYYY-MM-DD_HH-MM-SS.png` in the same directory as the
+Klipper log file, and prints a link to it (the link assumes
+[Moonraker](https://github.com/Arksine/moonraker) serves the `logs` root).
+Plotting requires `matplotlib` and a configured log file; if there is no log
+file the plot is skipped.
 
 ### ⚠️ [z_calibration]
 

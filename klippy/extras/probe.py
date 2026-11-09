@@ -5,6 +5,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 from __future__ import annotations
 
+import contextlib
+import inspect
 import logging
 import math
 from dataclasses import dataclass
@@ -17,13 +19,45 @@ from klippy.extras.gcode_macro import Template
 from klippy.gcode import GCodeCommand
 from klippy.toolhead import ToolHead
 
-from . import manual_probe
-
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
 consider reducing the Z axis minimum position so the probe
 can travel further (the Z minimum position can be negative).
 """
+
+
+class ProbingContext(NamedTuple):
+    gcmd: GCodeCommand
+    always_restore_toolhead: bool = False
+
+
+def _call_multi_probe(method, context):
+    try:
+        method(context)
+    except TypeError:
+        try:
+            inspect.signature(method).bind(context)
+        except (TypeError, ValueError):
+            method()
+        else:
+            # If the signature matched, the TypeError was thrown inside of the method. Not by the call itself.
+            raise
+
+
+@contextlib.contextmanager
+def multi_probe_session(probe, context):
+    """Pair a probe session's begin and end, including on failure."""
+    try:
+        _call_multi_probe(probe.multi_probe_begin, context)
+        yield
+    except BaseException:
+        try:
+            _call_multi_probe(probe.multi_probe_end, context)
+        except Exception:
+            logging.exception("Multi-probe end")
+        raise
+    else:
+        _call_multi_probe(probe.multi_probe_end, context)
 
 
 class RetryStrategy(IntEnum):
@@ -154,7 +188,7 @@ class GcodeNozzleScrubber:
                 "ATTEMPT": attempt,
                 "RETRIES": retries,
             }
-            self.config.template.run_gcode_from_command(context)
+            self.config.template.run_gcode(gcmd, context)
             end_pos = toolhead.get_position()
             if not start_pos[:3] == end_pos[:3]:
                 raise gcmd.error(
@@ -343,6 +377,11 @@ class ProbeList:
             probe = self.printer.lookup_object("probe", None)
             if probe is not None:
                 self.default_probe = ("probe", probe)
+            else:
+                probe = self.get_probe("manual")
+                if probe is not None:
+                    probe.is_default_probe = True
+                    self.default_probe = (probe.probe_name, probe)
 
     def get_status(self, eventtime):
         return {
@@ -367,17 +406,25 @@ class ProbeList:
         gcmd,
         default=sentinel,
         no_default_error="No default probe registered, explicitly select probe by passing `PROBE=`",
+        default_probe_name=None,
+        param_name="PROBE",
     ) -> PrinterProbe:
-        requested_probe = gcmd.get("PROBE", None)
+        requested_probe = gcmd.get(param_name, default_probe_name)
+        if (
+            param_name == "PROBE"
+            and gcmd.get("METHOD", "automatic").lower() == "manual"
+        ):
+            requested_probe = "manual"
         if requested_probe is not None:
             if requested_probe in self.probes:
                 return self.probes[requested_probe]
             else:
                 raise gcmd.error(f"Unknown requested probe {requested_probe}")
         else:
-            if self.default_probe is None and default is sentinel:
+            probe = self.get_default_probe()
+            if probe is None and default is sentinel:
                 raise gcmd.error(no_default_error)
-            return (self.default_probe and self.default_probe[1]) or default
+            return probe or default
 
     def get_config_probe(self, config, default=sentinel) -> PrinterProbe:
         probe_name = config.get("probe", None)
@@ -422,10 +469,20 @@ class ProbeList:
 
 
 class PrinterProbe:
-    def __init__(self, config, mcu_probe):
+    def __init__(
+        self,
+        config,
+        mcu_probe,
+        default_z_offset=configfile.sentinel,
+        probe_name=None,
+        register_as_probe=None,
+        register_commands=True,
+    ):
         self.printer = config.get_printer()
         self.name = config.get_name()
-        self.probe_name = self.name.split(" ")[-1]
+        self.probe_name = (
+            probe_name if probe_name is not None else self.name.split(" ")[-1]
+        )
         self.mcu_probe = mcu_probe
         self.speed = config.getfloat("speed", 5.0, above=0.0)
         self.retry_speed: float = config.getfloat(
@@ -434,10 +491,10 @@ class PrinterProbe:
         self.lift_speed = config.getfloat("lift_speed", self.speed, above=0.0)
         self.x_offset = config.getfloat("x_offset", 0.0)
         self.y_offset = config.getfloat("y_offset", 0.0)
-        self.z_offset = config.getfloat("z_offset")
+        self.z_offset = config.getfloat("z_offset", default_z_offset)
         self.drop_first_result = config.getboolean("drop_first_result", False)
         self.probe_calibrate_z = 0.0
-        self.multi_probe_pending = False
+        self.multi_probe_count = 0
         self.last_state = False
         self.last_z_result = 0.0
         self.was_last_result_good = False
@@ -470,7 +527,11 @@ class PrinterProbe:
             "samples_tolerance_retries", 0, minval=0
         )
         # Register z_virtual_endstop pin
-        self.is_default_probe = config.getboolean("register_as_probe", True)
+        self.is_default_probe = (
+            config.getboolean("register_as_probe", True)
+            if register_as_probe is None
+            else register_as_probe
+        )
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip(self.probe_name, self)
         if self.is_default_probe and self.probe_name != "probe":
@@ -489,14 +550,12 @@ class PrinterProbe:
         self.printer.register_event_handler(
             "homing:home_rails_end", self._handle_home_rails_end
         )
-        self.printer.register_event_handler(
-            "gcode:command_error", self._handle_command_error
-        )
         # Register PROBE/QUERY_PROBE commands
         self.gcode = self.printer.lookup_object("gcode")
-        self.register_commands(self.probe_name)
-        if self.is_default_probe:
-            self.register_commands(None)
+        if register_commands:
+            self.register_commands(self.probe_name)
+            if self.is_default_probe:
+                self.register_commands(None)
 
     def register_commands(self, key):
         self.gcode.register_mux_command(
@@ -542,37 +601,47 @@ class PrinterProbe:
     def _handle_home_rails_begin(self, homing_state, rails):
         endstops = [es for rail in rails for es, name in rail.get_endstops()]
         if self.mcu_probe in endstops:
-            self.multi_probe_begin(always_restore_toolhead=True)
+            self.multi_probe_begin(
+                ProbingContext(
+                    always_restore_toolhead=True, gcmd=homing_state.gcmd
+                )
+            )
 
     def _handle_home_rails_end(self, homing_state, rails):
         endstops = [es for rail in rails for es, name in rail.get_endstops()]
         if self.mcu_probe in endstops:
-            self.multi_probe_end()
+            self.multi_probe_end(
+                ProbingContext(
+                    always_restore_toolhead=True, gcmd=homing_state.gcmd
+                )
+            )
 
-    def _handle_command_error(self):
-        try:
-            self.multi_probe_end()
-        except:
-            logging.exception("Multi-probe end")
+    def multi_probe_begin(self, context):
+        self.multi_probe_count += 1
+        if self.multi_probe_count > 1:
+            return
+        _call_multi_probe(self.mcu_probe.multi_probe_begin, context)
 
-    def multi_probe_begin(self, always_restore_toolhead=False):
-        try:
-            self.mcu_probe.multi_probe_begin(always_restore_toolhead)
-        except TypeError:
-            self.mcu_probe.multi_probe_begin()
-        self.multi_probe_pending = True
-
-    def multi_probe_end(self):
-        if self.multi_probe_pending:
-            self.multi_probe_pending = False
-            self.mcu_probe.multi_probe_end()
+    def multi_probe_end(self, context):
+        if self.multi_probe_count == 0:
+            return
+        self.multi_probe_count -= 1
+        if self.multi_probe_count == 0:
+            _call_multi_probe(self.mcu_probe.multi_probe_end, context)
 
     def setup_pin(self, pin_type, pin_params):
         if pin_type != "endstop" or pin_params["pin"] != "z_virtual_endstop":
             raise pins.error("Probe virtual endstop only useful as endstop pin")
         if pin_params["invert"] or pin_params["pullup"]:
             raise pins.error("Can not pullup/invert probe virtual endstop")
+        if not hasattr(self.mcu_probe, "get_mcu"):
+            raise pins.error("This probe cannot be used as a virtual endstop")
         return self.mcu_probe
+
+    def cancel_probe(self):
+        cancel = getattr(self.mcu_probe, "cancel_probe", None)
+        if cancel is not None:
+            cancel()
 
     def get_lift_speed(self, gcmd=None):
         if gcmd is not None:
@@ -619,7 +688,7 @@ class PrinterProbe:
         z_compensation = 0
         if axis_twist_compensation is not None:
             z_compensation = axis_twist_compensation.get_z_compensation_value(
-                pos
+                pos, self
             )
         # add z compensation to probe position
         epos[2] += z_compensation
@@ -691,6 +760,7 @@ class PrinterProbe:
     def run_probe(
         self, gcmd: GCodeCommand, retry_session: Optional[RetrySession] = None
     ) -> list[float]:
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         sample_count = gcmd.get_int("SAMPLES", self.sample_count, minval=1)
         samples_tolerance = gcmd.get_float(
@@ -720,32 +790,36 @@ class PrinterProbe:
                 "Probing from the Nozzle Scrubber Gcode cannot use retries."
                 " (Hint: Use BAD_PROBE_STRATEGY=IGNORE or FAIL)"
             )
-        must_notify_multi_probe = not self.multi_probe_pending
-        if must_notify_multi_probe:
-            self.multi_probe_begin(always_restore_toolhead=True)
-        # save X and Y position
-        toolhead = self.printer.lookup_object("toolhead")
-        request_pos = toolhead.get_position()[:2]
-        retries = 0
-        positions = []
-        self._discard_first_result(speed, local_retry_session, gcmd)
-        while len(positions) < sample_count:
-            # Probe position with retries
-            pos = self._run_probe_with_retries(speed, local_retry_session, gcmd)
-            positions.append(pos)
-            # Check samples tolerance
-            z_positions = [p[2] for p in positions]
-            if max(z_positions) - min(z_positions) > samples_tolerance:
-                if retries >= samples_retries:
-                    raise gcmd.error("Probe samples exceed samples_tolerance")
-                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
-                retries += 1
-                positions = []
-            # Retract
-            if len(positions) < sample_count:
-                self._retract(gcmd)
-        if must_notify_multi_probe:
-            self.multi_probe_end()
+        with multi_probe_session(
+            self, ProbingContext(always_restore_toolhead=True, gcmd=gcmd)
+        ):
+            # save X and Y position
+            toolhead = self.printer.lookup_object("toolhead")
+            request_pos = toolhead.get_position()[:2]
+            retries = 0
+            positions = []
+            self._discard_first_result(speed, local_retry_session, gcmd)
+            while len(positions) < sample_count:
+                # Probe position with retries
+                pos = self._run_probe_with_retries(
+                    speed, local_retry_session, gcmd
+                )
+                positions.append(pos)
+                # Check samples tolerance
+                z_positions = [p[2] for p in positions]
+                if max(z_positions) - min(z_positions) > samples_tolerance:
+                    if retries >= samples_retries:
+                        raise gcmd.error(
+                            "Probe samples exceed samples_tolerance"
+                        )
+                    gcmd.respond_info(
+                        "Probe samples exceed tolerance. Retrying..."
+                    )
+                    retries += 1
+                    positions = []
+                # Retract
+                if len(positions) < sample_count:
+                    self._retract(gcmd)
         # Calculate and return result
         if samples_result == "median":
             return self._calc_median(positions)
@@ -784,6 +858,7 @@ class PrinterProbe:
     cmd_PROBE_ACCURACY_help = "Probe Z-height accuracy at current XY position"
 
     def cmd_PROBE_ACCURACY(self, gcmd: GCodeCommand):
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = self.get_lift_speed(gcmd)
         sample_count = gcmd.get_int("SAMPLES", 10, minval=1)
@@ -807,22 +882,24 @@ class PrinterProbe:
             )
         )
         # Probe bed sample_count times
-        self.multi_probe_begin(always_restore_toolhead=True)
-        # Initialize probe retry state
-        # force FAIL behavior for PROBE_ACCURACY, never accept bad probes
-        retry_session = RetrySession(
-            self.retry_policy_factory.customize(gcmd, RetryStrategy.FAIL), gcmd
-        )
-        retry_session.set_position(toolhead.get_position())
-        positions = []
-        self._discard_first_result(speed, retry_session, gcmd)
-        while len(positions) < sample_count:
-            # Probe position
-            pos = self._run_probe_with_retries(speed, retry_session, gcmd)
-            positions.append(pos)
-            # Retract
-            self._retract(gcmd)
-        self.multi_probe_end()
+        with multi_probe_session(
+            self, ProbingContext(always_restore_toolhead=True, gcmd=gcmd)
+        ):
+            # Initialize probe retry state
+            # force FAIL behavior for PROBE_ACCURACY, never accept bad probes
+            retry_session = RetrySession(
+                self.retry_policy_factory.customize(gcmd, RetryStrategy.FAIL),
+                gcmd,
+            )
+            retry_session.set_position(toolhead.get_position())
+            positions = []
+            self._discard_first_result(speed, retry_session, gcmd)
+            while len(positions) < sample_count:
+                # Probe position
+                pos = self._run_probe_with_retries(speed, retry_session, gcmd)
+                positions.append(pos)
+                # Retract
+                self._retract(gcmd)
         # Calculate maximum, minimum and average values
         max_value = max([p[2] for p in positions])
         min_value = min([p[2] for p in positions])
@@ -864,7 +941,13 @@ class PrinterProbe:
     cmd_PROBE_CALIBRATE_help = "Calibrate the probe's z_offset"
 
     def cmd_PROBE_CALIBRATE(self, gcmd):
-        manual_probe.verify_no_manual_probe(self.printer)
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
+        reference = ProbeList.get_list(self.printer).get_probe(
+            gcmd.get("REFERENCE_PROBE", "manual")
+        )
+        if reference is None:
+            raise gcmd.error("No reference probe registered")
+        reference_offsets = reference.get_offsets()
         # Perform initial probe
         lift_speed = self.get_lift_speed(gcmd)
         curpos = self.run_probe(gcmd)
@@ -872,14 +955,13 @@ class PrinterProbe:
         self.probe_calibrate_z = curpos[2]
         curpos[2] += 5.0
         self._move(curpos, lift_speed)
-        # Move the nozzle over the probe point
-        curpos[0] += self.x_offset
-        curpos[1] += self.y_offset
+        # Move the reference probe over the initial contact point
+        curpos[0] += self.x_offset - reference_offsets[0]
+        curpos[1] += self.y_offset - reference_offsets[1]
         self._move(curpos, self.speed)
-        # Start manual probe
-        manual_probe.ManualProbeHelper(
-            self.printer, gcmd, self.probe_calibrate_finalize
-        )
+        reference_pos = list(reference.run_probe(gcmd))
+        reference_pos[2] -= reference_offsets[2]
+        self.probe_calibrate_finalize(reference_pos)
 
     def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
         offset = self.gcode_move.get_status()["homing_origin"].z
@@ -939,50 +1021,50 @@ class ProbeEndstopWrapper:
             if stepper.is_active_axis("z"):
                 self.add_stepper(stepper)
 
-    def _raise_probe(self):
+    def _raise_probe(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
         start_pos = toolhead.get_position()
-        self.deactivate_gcode.run_gcode_from_command()
+        self.deactivate_gcode.run_gcode(gcmd)
         if toolhead.get_position()[:3] != start_pos[:3]:
             raise self.printer.command_error(
                 "Toolhead moved during probe deactivate_gcode script"
             )
 
-    def _lower_probe(self):
+    def _lower_probe(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
         start_pos = toolhead.get_position()
-        self.activate_gcode.run_gcode_from_command()
+        self.activate_gcode.run_gcode(gcmd)
         if toolhead.get_position()[:3] != start_pos[:3]:
             raise self.printer.command_error(
                 "Toolhead moved during probe activate_gcode script"
             )
 
-    def multi_probe_begin(self):
+    def multi_probe_begin(self, context):
         if self.stow_on_each_sample:
             return
         self.multi = "FIRST"
 
-    def multi_probe_end(self):
+    def multi_probe_end(self, context):
         if self.stow_on_each_sample:
             return
-        self._raise_probe()
+        self._raise_probe(context.gcmd)
         self.multi = "OFF"
 
     def probing_move(
         self, pos, speed, gcmd: GCodeCommand
     ) -> Union[list[float], tuple[list[float], bool]]:
         phoming = self.printer.lookup_object("homing")
-        return phoming.probing_move(self, pos, speed)
+        return phoming.probing_move(self, pos, speed, gcmd)
 
     def probe_prepare(self, hmove):
         if self.multi == "OFF" or self.multi == "FIRST":
-            self._lower_probe()
+            self._lower_probe(hmove.gcmd)
             if self.multi == "FIRST":
                 self.multi = "ON"
 
     def probe_finish(self, hmove):
         if self.multi == "OFF":
-            self._raise_probe()
+            self._raise_probe(hmove.gcmd)
 
     def get_position_endstop(self):
         return self.position_endstop
@@ -994,17 +1076,22 @@ class ProbePointsHelper:
     def __init__(
         self,
         config,
-        finalize_callback,
+        finalize_callback=None,
         default_points=None,
         option_name="points",
         use_offsets=False,
         enable_horizontal_z_clearance: bool = False,
+        completion=None,
     ):
         self.printer = config.get_printer()
         self.finalize_callback = finalize_callback
+        # Optional per-pass result: (offsets, positions), or None on cancellation.
+        self.completion = completion
+        self._completion_result = None
+        self._active_probe = None
+        self._cancelled = False
         self.probe_points = default_points
         self.name = config.get_name()
-        self.gcode = self.printer.lookup_object("gcode")
         # Read config settings
         if default_points is None or config.get(option_name, None) is not None:
             self.probe_points = config.getlists(
@@ -1109,7 +1196,14 @@ class ProbePointsHelper:
         finalize = len(self.results) >= len(self.probe_points)
         if finalize:
             toolhead.get_last_move_time()
-            res = self.finalize_callback(self.probe_offsets, self.results)
+            if self.completion is not None:
+                self._completion_result = (
+                    self.probe_offsets,
+                    [pos[:] for pos in self.results],
+                )
+            res = None
+            if self.finalize_callback is not None:
+                res = self.finalize_callback(self.probe_offsets, self.results)
             if isinstance(res, (int, float)):
                 if res == 0:
                     done = True
@@ -1136,20 +1230,24 @@ class ProbePointsHelper:
         return False
 
     def start_probe(self, gcmd: GCodeCommand):
+        self.printer.lookup_object("manual_probe").verify_no_manual_probe()
+        try:
+            self._start_probe(gcmd)
+        except Exception:
+            self._active_retry_session = None
+            self._complete_probe(None)
+            raise
+
+    def _start_probe(self, gcmd: GCodeCommand):
+        self._completion_result = None
+        self._cancelled = False
         self._active_retry_session = RetrySession(
             self.retry_policy_factory.customize(gcmd), gcmd
         )
-        manual_probe.verify_no_manual_probe(self.printer)
         # Lookup objects
         plist = ProbeList.get_list(self.printer)
-        probe = plist.get_command_probe(gcmd, None)
+        probe = plist.get_command_probe(gcmd)
         method = gcmd.get("METHOD", "automatic").lower()
-        if method != "manual" and (probe is None and plist.get_all()):
-            raise gcmd.error(
-                "No default probe, but named probes are available. "
-                "Either select a probe with PROBE= or use METHOD=manual "
-                "to enter manual probing mode."
-            )
 
         self.results = []
         self._probe_pass_direction_reversed = self.start_reverse
@@ -1167,8 +1265,8 @@ class ProbePointsHelper:
         if enforce_lift_speed is not None:
             self.enforce_lift_speed = enforce_lift_speed
 
-        if probe is not None and method == "rapid_scan":
-            mcu_probe = probe.mcu_probe
+        if method == "rapid_scan":
+            mcu_probe = getattr(probe, "mcu_probe", None)
             can_scan = hasattr(mcu_probe, "begin_collect_distance")
             if can_scan:
                 return self._start_rapid_scan(gcmd, probe)
@@ -1178,28 +1276,30 @@ class ProbePointsHelper:
                 )
                 method = "automatic"
 
-        if probe is None or method != "automatic":
-            # Manual probe
-            self.lift_speed = self.speed
-            self.probe_offsets = (0.0, 0.0, 0.0)
-            self._manual_probe_start()
-            return
-        # Perform automatic probing
         self.lift_speed = probe.get_lift_speed(gcmd)
         self.probe_offsets = probe.get_offsets()
         if self.horizontal_move_z < self.probe_offsets[2]:
             raise gcmd.error(
                 "horizontal_move_z can't be less than probe's z_offset"
             )
-        probe.multi_probe_begin()
-        while True:
-            done = self._move_next()
-            if done:
-                break
-            pos = probe.run_probe(gcmd, self._active_retry_session)
-            logging.info(f"Probe pos:{pos}")
-            self._store_probe_result(pos)
-        probe.multi_probe_end()
+        self._active_probe = probe
+        try:
+            with multi_probe_session(probe, ProbingContext(gcmd=gcmd)):
+                while True:
+                    self._check_cancelled(gcmd)
+                    done = self._move_next()
+                    self._check_cancelled(gcmd)
+                    if done:
+                        break
+                    pos = probe.run_probe(gcmd, self._active_retry_session)
+                    self._check_cancelled(gcmd)
+                    logging.info(f"Probe pos:{pos}")
+                    self._store_probe_result(pos)
+        finally:
+            self._active_probe = None
+            self._active_retry_session = None
+        self._check_cancelled(gcmd)
+        self._complete_probe(self._completion_result)
 
     def _start_rapid_scan(self, gcmd: GCodeCommand, probe: PrinterProbe):
         toolhead: ToolHead = self.printer.lookup_object("toolhead")
@@ -1226,117 +1326,143 @@ class ProbePointsHelper:
             "axis_twist_compensation", None
         )
 
-        probe.multi_probe_begin()
+        self._active_probe = probe
+        try:
+            with multi_probe_session(probe, ProbingContext(gcmd=gcmd)):
+                done = False
+                while not done:
+                    self._check_cancelled(gcmd)
+                    # If needed, raise up so we can move down to pull out backlash
+                    cur_pos = toolhead.get_position()
+                    if cur_pos[2] < scan_height + 0.5:
+                        cur_pos[2] = scan_height + 0.5
+                        toolhead.manual_move(cur_pos, self.lift_speed)
 
-        done = False
-        while not done:
-            # If needed, raise up so we can move down to pull out backlash
-            cur_pos = toolhead.get_position()
-            if cur_pos[2] < scan_height + 0.5:
-                cur_pos[2] = scan_height + 0.5
-                toolhead.manual_move(cur_pos, self.lift_speed)
+                    # Move down to scan height
+                    cur_pos[2] = scan_height
+                    toolhead.manual_move(cur_pos, probe_speed)
 
-            # Move down to scan height
-            cur_pos[2] = scan_height
-            toolhead.manual_move(cur_pos, probe_speed)
+                    path = self._generate_rapid_path()
 
-            path = self._generate_rapid_path()
+                    toolhead.manual_move(path[0][0], scan_speed)
+                    toolhead.wait_moves()
 
-            toolhead.manual_move(path[0][0], scan_speed)
-            toolhead.wait_moves()
-
-            session = cast(
-                ProbeDistanceCollector, probe.mcu_probe.begin_collect_distance()
-            )
-            try:
-                sample_rate = session.sample_rate()
-                sample_interval = 1.0 / sample_rate
-
-                if window < sample_interval:
-                    max_speed = round(2.0 * sample_rate, 1)
-                    raise gcmd.error(
-                        "Sample rate is not high enough for the requested speed. "
-                        f"At {sample_rate} Hz, maximum possible speed is ~{max_speed} mm/s but {scan_speed} mm/s was requested. "
-                        "Actual attainable speed may be lower."
+                    session = cast(
+                        ProbeDistanceCollector,
+                        probe.mcu_probe.begin_collect_distance(),
                     )
+                    try:
+                        sample_rate = session.sample_rate()
+                        sample_interval = 1.0 / sample_rate
 
-                toolhead.dwell(sample_interval)
+                        if window < sample_interval:
+                            max_speed = round(2.0 * sample_rate, 1)
+                            raise gcmd.error(
+                                "Sample rate is not high enough for the requested speed. "
+                                f"At {sample_rate} Hz, maximum possible speed is ~{max_speed} mm/s but {scan_speed} mm/s was requested. "
+                                "Actual attainable speed may be lower."
+                            )
 
-                point_times: list[tuple[float, tuple[float, float]]] = []
+                        toolhead.dwell(sample_interval)
 
-                def capture_timestamp(time: float, point: tuple[float, float]):
-                    point_times.append((time, point))
+                        point_times: list[
+                            tuple[float, tuple[float, float]]
+                        ] = []
 
-                for point, capture in path[1:]:
-                    toolhead.manual_move(point, scan_speed)
-                    if capture:
-                        toolhead.register_lookahead_callback(
-                            lambda time, p=point: capture_timestamp(time, p)
+                        def capture_timestamp(
+                            time: float, point: tuple[float, float]
+                        ):
+                            point_times.append((time, point))
+
+                        for point, capture in path[1:]:
+                            toolhead.manual_move(point, scan_speed)
+                            if capture:
+                                toolhead.register_lookahead_callback(
+                                    lambda time, p=point: capture_timestamp(
+                                        time, p
+                                    )
+                                )
+
+                        toolhead.wait_moves()
+                        toolhead.dwell(sample_interval)
+                        samples = session.finish(toolhead.get_last_move_time())
+                    except Exception:
+                        session.finish(toolhead.get_last_move_time())
+                        raise
+
+                    # In `point_times` we now have the timestamp of reaching each point in `self.probe_points`,
+                    # and we have all the (time,dist) samples. Both will be monotonically increasing in time,
+                    # so walk through them together and calculate the bed surface z.
+
+                    j = 0
+
+                    # Window catches all samples within a 2mm disc centered on the target point,
+                    # based on the maximum speed during the scan. Moving slower results in a bigger time window
+                    # and thus more samples for that point.
+                    half_window = window / 2.0
+                    for time, point in point_times:
+                        earliest = time - half_window
+                        latest = time + half_window
+                        while j < len(samples) and samples[j].time < earliest:
+                            j += 1
+                        end = j
+                        while end < len(samples) and samples[end].time < latest:
+                            end += 1
+                        if j == end:
+                            raise gcmd.error(
+                                f"Scanning failed. Point at ({point[0]},{point[1]}) had no samples collected for it."
+                            )
+                        relevant = samples[j:end]
+                        invalid = any(abs(p.distance) >= 99.0 for p in relevant)
+                        if invalid:
+                            raise gcmd.error(
+                                f"Scanning failed. Point at ({point[0]},{point[1]}) gathered one or more invalid samples."
+                            )
+                        distance = sum([p.distance for p in relevant]) / (
+                            end - j
+                        )
+                        z = scan_height - distance + self.probe_offsets[2]
+                        if axis_twist_compensation is not None:
+                            z += axis_twist_compensation.get_z_compensation_value(
+                                (point[0], point[1], scan_height), probe
+                            )
+                        self._store_probe_result((point[0], point[1], z))
+
+                    self._check_cancelled(gcmd)
+                    if self.completion is not None:
+                        self._completion_result = (
+                            self.probe_offsets,
+                            [pos[:] for pos in self.results],
+                        )
+                    res = None
+                    if self.finalize_callback is not None:
+                        res = self.finalize_callback(
+                            self.probe_offsets, self.results
+                        )
+                    self._check_cancelled(gcmd)
+                    self.results = []
+                    if isinstance(res, (int, float)):
+                        if res == 0:
+                            done = True
+                        if self.adaptive_horizontal_move_z:
+                            # then res is error
+                            error = math.ceil(res)
+                            scan_height = max(
+                                error + self.probe_offsets[2],
+                                self.min_horizontal_move_z,
+                            )
+                    elif res != "retry":
+                        done = True
+                    if not done and self.alternate_probe_direction:
+                        self._probe_pass_direction_reversed = (
+                            not self._probe_pass_direction_reversed
                         )
 
-                toolhead.wait_moves()
-                toolhead.dwell(sample_interval)
-                samples = session.finish(toolhead.get_last_move_time())
-            except Exception:
-                session.finish(toolhead.get_last_move_time())
-                raise
-
-            # In `point_times` we now have the timestamp of reaching each point in `self.probe_points`,
-            # and we have all the (time,dist) samples. Both will be monotonically increasing in time,
-            # so walk through them together and calculate the bed surface z.
-
-            j = 0
-
-            # Window catches all samples within a 2mm disc centered on the target point,
-            # based on the maximum speed during the scan. Moving slower results in a bigger time window
-            # and thus more samples for that point.
-            half_window = window / 2.0
-            for time, point in point_times:
-                earliest = time - half_window
-                latest = time + half_window
-                while j < len(samples) and samples[j].time < earliest:
-                    j += 1
-                end = j
-                while end < len(samples) and samples[end].time < latest:
-                    end += 1
-                if j == end:
-                    raise gcmd.error(
-                        f"Scanning failed. Point at ({point[0]},{point[1]}) had no samples collected for it."
-                    )
-                relevant = samples[j:end]
-                invalid = any(abs(p.distance) >= 99.0 for p in relevant)
-                if invalid:
-                    raise gcmd.error(
-                        f"Scanning failed. Point at ({point[0]},{point[1]}) gathered one or more invalid samples."
-                    )
-                distance = sum([p.distance for p in relevant]) / (end - j)
-                z = scan_height - distance + self.probe_offsets[2]
-                if axis_twist_compensation is not None:
-                    z += axis_twist_compensation.get_z_compensation_value(
-                        (point[0], point[1], scan_height)
-                    )
-                self._store_probe_result((point[0], point[1], z))
-
-            res = self.finalize_callback(self.probe_offsets, self.results)
-            self.results = []
-            if isinstance(res, (int, float)):
-                if res == 0:
-                    done = True
-                if self.adaptive_horizontal_move_z:
-                    # then res is error
-                    error = math.ceil(res)
-                    scan_height = max(
-                        error + self.probe_offsets[2],
-                        self.min_horizontal_move_z,
-                    )
-            elif res != "retry":
-                done = True
-            if not done and self.alternate_probe_direction:
-                self._probe_pass_direction_reversed = (
-                    not self._probe_pass_direction_reversed
-                )
-
-        probe.multi_probe_end()
+        finally:
+            self._active_probe = None
+            self._active_retry_session = None
+        self._check_cancelled(gcmd)
+        self._complete_probe(self._completion_result)
 
     def _generate_rapid_path(self) -> list[tuple[tuple[float, float], bool]]:
         # TODO: When changing direction, add an arc where the points don't capture
@@ -1359,19 +1485,19 @@ class ProbePointsHelper:
             points.append(((x, y), True))
         return points
 
-    def _manual_probe_start(self):
-        done = self._move_next()
-        if not done:
-            gcmd = self.gcode.create_gcode_command("", "", {})
-            manual_probe.ManualProbeHelper(
-                self.printer, gcmd, self._manual_probe_finalize
-            )
+    def _complete_probe(self, result):
+        if self.completion is not None and not self.completion.test():
+            self.completion.complete(result)
 
-    def _manual_probe_finalize(self, kin_pos):
-        if kin_pos is None:
-            return
-        self._store_probe_result(kin_pos)
-        self._manual_probe_start()
+    def _check_cancelled(self, gcmd):
+        if self._cancelled:
+            raise gcmd.error("Probing cancelled")
+
+    def cancel(self):
+        self._cancelled = True
+        cancel = getattr(self._active_probe, "cancel_probe", None)
+        if cancel is not None:
+            cancel()
 
 
 def load_config(config):

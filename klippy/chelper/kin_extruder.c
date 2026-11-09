@@ -328,6 +328,7 @@ extruder_set_pressure_advance(struct stepper_kinematics *sk, double print_time
                 first_pa, node);
         if (next_pa->active_print_time >= cleanup_time) break;
         list_del(&first_pa->node);
+        free(first_pa);
         first_pa = next_pa;
     }
 

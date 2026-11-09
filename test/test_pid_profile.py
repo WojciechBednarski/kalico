@@ -35,7 +35,15 @@ def _make_pmgr(heater):
 
 def _gcmd(heater, params):
     return klippy.gcode.GCodeCommand(
-        heater.gcode, "PID_PROFILE", "PID_PROFILE", params, False
+        heater.gcode,
+        "PID_PROFILE",
+        "PID_PROFILE",
+        params,
+        None,
+        klippy.gcode.GCodeContextScope(
+            klippy.gcode.GCodeContextRoot(heater.gcode.get_mutex()),
+            heater.gcode.get_interrupt_token(),
+        ),
     )
 
 
@@ -111,10 +119,11 @@ class _FakeConfig:
         return Exception(msg)
 
 
-class _FakeGCode:
+class _FakeGCode(PrinterShim.GCode):
     error = Exception
 
     def __init__(self):
+        super().__init__()
         self.messages = []
 
     def respond_info(self, msg):
