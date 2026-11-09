@@ -1,0 +1,6 @@
+# A retraction longer than the 2mm per-segment cap must be refused
+DICTIONARY atmega2560.dict
+CONFIG extruder_profile.cfg
+SHOULD_FAIL
+
+EXTRUDER_PROFILE_MOVE PROFILE="V0=0:V1=-5:ACCEL=500, V1=-5:DISTANCE=-5, V1=0:ACCEL=500, V1=5:ACCEL=500, V1=5:DISTANCE=10, V1=0:ACCEL=500"

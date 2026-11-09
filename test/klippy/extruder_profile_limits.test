@@ -1,0 +1,6 @@
+# A profile that exceeds max_extrude_only_velocity must be refused outright
+DICTIONARY atmega2560.dict
+CONFIG extruder_profile.cfg
+SHOULD_FAIL
+
+EXTRUDER_PROFILE_MOVE PROFILE="V0=0:V1=500:ACCEL=500, V1=0:ACCEL=500"

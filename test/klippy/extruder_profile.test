@@ -1,0 +1,31 @@
+# Extruder-only profile moves with pressure advance
+DICTIONARY atmega2560.dict
+CONFIG extruder_profile.cfg
+
+# The feature reports itself, including the commit it was verified against
+EXTRUDER_PROFILE_STATUS
+
+# A single trapezoid, no XY motion and nothing homed
+EXTRUDER_PROFILE_MOVE PROFILE="V0=0:V1=5:ACCEL=500, V1=5:DISTANCE=4, V1=0:ACCEL=500"
+
+# Speed changes with non-zero joint speeds: 5 -> 2 -> 5 mm/s without stopping
+EXTRUDER_PROFILE_MOVE PROFILE="V0=0:V1=5:ACCEL=500, V1=5:DURATION=0.15, V1=2:ACCEL=500, V1=2:DURATION=0.15, V1=5:ACCEL=500, V1=5:DURATION=0.15, V1=0:ACCEL=500"
+
+# A retraction that is primed back within the profile
+EXTRUDER_PROFILE_MOVE PROFILE="V0=0:V1=-5:ACCEL=500, V1=-5:DISTANCE=-1, V1=0:ACCEL=500, V1=5:ACCEL=500, V1=5:DISTANCE=4, V1=0:ACCEL=500"
+
+# Non-default PA parameters are picked up from whatever is in effect
+SET_PRESSURE_ADVANCE ADVANCE=0.08 SMOOTH_TIME=0.02
+EXTRUDER_PROFILE_MOVE PROFILE="V0=0:V1=8:ACCEL=800, V1=8:DISTANCE=6, V1=0:ACCEL=800"
+
+# A second extruder stepper is driven too
+EXTRUDER_PROFILE_MOVE EXTRUDER=extruder PROFILE="V0=0:V1=3:ACCEL=300, V1=0:ACCEL=300"
+
+# Ordinary motion still works afterwards, including extrusion and retraction
+G1 E5
+G1 E-2
+G1 E7
+G28
+G1 X20 Y20 Z1
+G1 X25 Y25 E7.5
+M84
